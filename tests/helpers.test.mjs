@@ -619,7 +619,11 @@ test('#2 rain band: chance grows up from the mid line, amount down, and each hou
       { column: 0, x0: 0, x1: 1 / 24, kind: 'hourly', chance: 50, amount: 5 },
     ],
     spans: [{ column: 1, x0: 0.5, x1: 1.5, chance: 80, amount: 12.4 }],
-    peaks: [{ column: 0, x0: -0.5, x1: 0.5, chance: 50, amount: 5 }],
+    peaks: [
+      { column: 0, x0: -0.5, x1: 0.5, chance: 50, amount: 5 },
+      // One forecast hour is narrower than its numbers.
+      { column: 1, x0: 0.5, x1: 0.5 + 1 / 24, chance: 10, amount: 0.2 },
+    ],
     hourly: { x0: 0, x1: 1 / 24 },
   };
   const { ctx, drawn } = recordingContext();
@@ -640,7 +644,7 @@ test('#2 rain band: chance grows up from the mid line, amount down, and each hou
   assert.deepEqual(texts.filter(([text]) => text.includes('%') || text.includes('mm')), [
     ['50%', 4], ['5.0 mm', 4],
     ['80%', 150], ['12 mm', 150],
-  ], 'peak numbers at the left of the column; daily boxes centred in their span');
+  ], 'peak numbers at the left of the column, none where the hours are narrower than the number; daily boxes centred in their span');
 });
 
 for (const [criterion, forecast] of [['#2 criterion 8: with no intraday_entity', {}], ['#2 criterion 9: with an intraday_entity that does not exist', { intraday_entity: 'sensor.missing' }]]) {
