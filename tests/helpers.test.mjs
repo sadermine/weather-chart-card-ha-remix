@@ -300,7 +300,7 @@ test('config changes select the cached forecast before redrawing', async () => {
   assert.deepEqual(Object.keys(card._forecastSubscriptions), ['hourly']);
 });
 
-const { columnPosition, buildIntradayLine, dayLabels, placeLabels } = await import('../src/intraday.js');
+const { columnPosition, buildIntradayLine, dayLabels, placeLabels, localMidnight } = await import('../src/intraday.js');
 const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 1e-9, `${message}: ${actual} != ${expected}`);
 const owmDay = (dt, [morn, day, eve, night], min, max) => ({ dt, temp: { morn, day, eve, night, min, max } });
 const noonUtc = (day) => Date.UTC(2026, 2, day, 12) / 1000;
@@ -349,6 +349,26 @@ test('#2 criterion 6: temp.max and temp.min become points between the extreme sa
   });
   assert.equal(xsOf(lateHigh, 54).length, 1);
   assert.ok(xsOf(lateHigh, 54)[0] <= columnPosition(0, 23.5), 'stays in its own day, no later than 23:30');
+});
+
+test('#2 criterion 6: no estimate when the extreme sample lies under the hourly forecast', () => {
+  // Hourly covers day 1 until 15:00, including its 06:00 low; the lowest remaining sample (11 PM) is not the day's low.
+  const hourly = [];
+  for (let h = 15; h <= 39; h++) hourly.push({ time: Date.UTC(2026, 2, 9, h), value: h === 30 ? 49 : 55 });
+  const line = buildIntradayLine({
+    columns: ['2026-03-09', '2026-03-10'],
+    hourly,
+    daily: [owmDay(noonUtc(10), [49, 63, 60, 56], 48, 63)],
+    now: Date.UTC(2026, 2, 9, 14),
+    timeZone: 'UTC',
+  });
+  assert.equal(line.filter((p) => p.y === 48).length, 0, 'no 48 point late in the day');
+});
+
+test('#2 localMidnight: a day whose midnight is skipped starts at 01:00', () => {
+  // America/Santiago moves its clocks from 00:00 to 01:00 on 2026-09-06.
+  const start = localMidnight(Date.UTC(2026, 8, 6, 15), 'America/Santiago');
+  assert.equal(new Date(start).toISOString(), '2026-09-06T04:00:00.000Z');
 });
 
 test('#2 criterion 7: each day gets one high and one low label, at its extremes, in the colour of their part', () => {

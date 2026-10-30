@@ -37,7 +37,7 @@ export function localDateHour(timeMs, timeZone) {
   return { date, hour: part('hour') + part('minute') / 60 + part('second') / 3600 };
 }
 
-/** The instant of local midnight that starts the day containing `timeMs`, exact across a DST change. */
+/** The first instant of the local day containing `timeMs`, exact across a DST change. */
 export function localMidnight(timeMs, timeZone) {
   const { date } = localDateHour(timeMs, timeZone);
   let midnight = timeMs;
@@ -46,6 +46,9 @@ export function localMidnight(timeMs, timeZone) {
     if (local.date === date && local.hour === 0) break;
     midnight += local.date === date ? -local.hour * HOUR_MS : (24 - local.hour) * HOUR_MS;
   }
+  const local = localDateHour(midnight, timeZone);
+  // Where the clocks skip midnight, the day starts at the first hour that exists.
+  if (local.date !== date) midnight += (24 - local.hour) * HOUR_MS;
   return midnight;
 }
 
@@ -72,6 +75,8 @@ function estimateExtreme(line, samples, extreme, isHigh, column) {
   const sample = samples.reduce((best, s) => ((isHigh ? s.y > best.y : s.y < best.y) ? s : best));
   if (isHigh ? extreme <= sample.y : extreme >= sample.y) return null;
   const index = line.indexOf(sample);
+  // The extreme sample lies under the hourly forecast, which already shows that day's extreme.
+  if (index < 0) return null;
   const neighbours = [line[index - 1], line[index + 1]].filter(Boolean);
   if (!neighbours.length) return null;
   const neighbour = neighbours.reduce((best, n) => (Math.abs(n.y - extreme) < Math.abs(best.y - extreme) ? n : best));
@@ -105,12 +110,13 @@ export function buildIntradayLine({ columns, actual = [], hourly = [], daily = [
     if (!place || !entry.temp) return [];
     const samples = FOUR_A_DAY_SAMPLES
       .map(([key, hour]) => ({ x: columnPosition(place.column, hour), y: entry.temp[key], part: 'fourADay' }))
-      .filter((p) => Number.isFinite(p.y) && p.x > coveredUntil);
+      .filter((p) => Number.isFinite(p.y));
     return [{ column: place.column, samples, min: entry.temp.min, max: entry.temp.max }];
   });
 
   const byX = (a, b) => a.x - b.x;
-  const line = [...actualPoints, ...hourlyPoints, ...days.flatMap((d) => d.samples)].sort(byX);
+  const drawn = days.flatMap((d) => d.samples).filter((p) => p.x > coveredUntil);
+  const line = [...actualPoints, ...hourlyPoints, ...drawn].sort(byX);
   const estimates = days.flatMap((day) => [
     estimateExtreme(line, day.samples, day.max, true, day.column),
     estimateExtreme(line, day.samples, day.min, false, day.column),
