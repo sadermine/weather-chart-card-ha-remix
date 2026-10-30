@@ -2072,9 +2072,9 @@ buildIntradayLabelsPlugin() {
       const labels = dayLabels(points, columnCount, colors).map((label) => {
         const px = xScale.getPixelForValue(label.point.x);
         const py = yScale.getPixelForValue(label.point.y);
-        const text = self.renderBidiMeasurement(label.point.y + '°');
+        const text = self.renderBidiMeasurement(label.value + '°');
         return {
-          ...label, px, py, text, value: label.point.y, cx: px,
+          ...label, px, py, text, cx: px,
           width: c.measureText(text).width,
           height: fontSize,
           top: label.kind === 'high' ? py - offset - fontSize : py + offset,

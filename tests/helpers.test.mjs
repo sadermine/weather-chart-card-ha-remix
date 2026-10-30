@@ -388,6 +388,19 @@ test('#2 criterion 7: each day gets one high and one low label, at its extremes,
   ]);
 });
 
+test('#2 criterion 7: day numbers show whole degrees, whatever the source precision', () => {
+  const colors = { actual: 'orange', hourly: 'blue', fourADay: 'navy' };
+  const points = [
+    { x: -0.2, y: 41.9, part: 'fourADay' },
+    { x: 0.1, y: 65.3, part: 'fourADay' },
+    { x: 0.3, y: 50.5, part: 'fourADay' },
+  ];
+  assert.deepEqual(dayLabels(points, 1, colors).map(({ kind, value }) => [kind, value]), [
+    ['high', 65],
+    ['low', 42],
+  ]);
+});
+
 test('#2 criterion 7: overlapping numbers slide into their own columns, and only the lower low stays if that is not enough', () => {
   const columns = [{ left: 0, right: 50 }, { left: 50, right: 100 }];
   const area = { left: 0, right: 100 };

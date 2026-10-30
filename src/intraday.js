@@ -139,7 +139,7 @@ export function splitParts(points) {
   return series;
 }
 
-/** Each day's highest and lowest point on the line, coloured by the part it is on. */
+/** Each day's highest and lowest point on the line, coloured by the part it is on, with its value in whole degrees. */
 export function dayLabels(points, columnCount, colors) {
   const labels = [];
   for (let column = 0; column < columnCount; column++) {
@@ -147,8 +147,8 @@ export function dayLabels(points, columnCount, colors) {
     if (!own.length) continue;
     const high = own.reduce((best, p) => (p.y > best.y ? p : best));
     const low = own.reduce((best, p) => (p.y < best.y ? p : best));
-    labels.push({ column, kind: 'high', point: high, color: colors[high.part] });
-    labels.push({ column, kind: 'low', point: low, color: colors[low.part] });
+    labels.push({ column, kind: 'high', point: high, value: Math.round(high.y), color: colors[high.part] });
+    labels.push({ column, kind: 'low', point: low, value: Math.round(low.y), color: colors[low.part] });
   }
   return labels;
 }
