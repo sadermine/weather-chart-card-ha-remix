@@ -152,3 +152,71 @@ for (const width of [390, 1200]) {
     });
   }
 }
+
+for (const direction of ['ltr', 'rtl']) {
+  for (const intraday of [false, true]) {
+    test('rain bars centre on their day columns: ' + direction + ', intraday line ' + (intraday ? 'on' : 'off'), async () => {
+      const page = await browser.newPage({ viewport: { width: 440, height: 844 } });
+      const errors = [];
+      page.on('pageerror', error => errors.push(error.message));
+      try {
+        await page.clock.setFixedTime(new Date('2026-10-18T15:00:00Z'));
+        await page.route('**/*', route => {
+          const path = new URL(route.request().url()).pathname;
+          if (path === '/card.js') return route.fulfill({ contentType:'text/javascript', body:bundle });
+          if (path === '/') return route.fulfill({ contentType:'text/html', body:'<!doctype html><html dir="' + direction + '"><meta charset="utf-8"><style>body{margin:0}weather-chart-card-ha{display:block}ha-card{display:block;background:#fff}</style><script src="/card.js"></script></html>' });
+          return route.abort();
+        });
+        await page.goto('http://bars.test/');
+        await page.evaluate(({ intraday }) => {
+          const card = document.createElement('weather-chart-card-ha');
+          const daily = Array.from({length:6}, (_, i) => ({
+            datetime: new Date(Date.UTC(2026, 9, 18 + i, 12)).toISOString(),
+            temperature: 20 + i, templow: 10 + i, condition: 'rainy', precipitation: 1 + i,
+          }));
+          const hourly = Array.from({length:48}, (_, i) => ({
+            datetime: new Date(Date.UTC(2026, 9, 18, 16 + i)).toISOString(), temperature: 15 + 5 * Math.sin(i / 4),
+          }));
+          const hass = {
+            language:'en', config: { time_zone:'UTC', unit_system:{ temperature:'°C', length:'km', wind_speed:'km/h', pressure:'hPa' } },
+            states: { 'weather.home': { state:'rainy', last_updated:'2026-10-18T14:50:00Z', last_changed:'2026-10-18T14:50:00Z', attributes:{
+              temperature:18, temperature_unit:'°C', humidity:65, pressure:1000, pressure_unit:'hPa', wind_speed:15, wind_speed_unit:'km/h', wind_bearing:90, supported_features:3,
+            } } },
+            callWS: () => Promise.resolve({}),
+            connection: { subscribeMessage(callback, message) {
+              setTimeout(() => callback({forecast: message.forecast_type === 'hourly' ? hourly : daily}), 0);
+              return Promise.resolve(() => {});
+            } },
+          };
+          card.setConfig({ entity:'weather.home', forecast:{ type:'daily', condition_icons:false, disable_animation:true, intraday_line:intraday } });
+          card.hass = hass;
+          document.body.append(card);
+          window.fixture = {card};
+        }, { intraday });
+        await page.waitForFunction(({ intraday }) => {
+          const chart = window.fixture.card.forecastChart;
+          return chart && (!intraday || chart.scales.intradayX);
+        }, { intraday }, {timeout:10000});
+        const result = await page.evaluate(() => {
+          const chart = window.fixture.card.forecastChart;
+          const rain = chart.data.datasets.findIndex(d => d.key === 'precip');
+          const x = chart.scales.x;
+          const columnWidth = Math.abs(x.getPixelForValue(1) - x.getPixelForValue(0));
+          return {
+            bars: chart.getDatasetMeta(rain).data.map((bar, k) => ({ offCentre: bar.x - x.getPixelForValue(k), width: bar.width })),
+            expectedWidth: columnWidth * chart.data.datasets[rain].barPercentage,
+            lineOffsets: chart.scales.intradayX ? chart.data.labels.map((_, k) => chart.scales.intradayX.getPixelForValue(k) - x.getPixelForValue(k)) : [],
+          };
+        });
+        assert.equal(result.bars.length, 6);
+        for (const bar of result.bars) {
+          assert.ok(Math.abs(bar.offCentre) < 1, 'bar centred on its column: ' + JSON.stringify(bar));
+          assert.ok(Math.abs(bar.width - result.expectedWidth) < 1, 'bar keeps its full width: ' + JSON.stringify(bar));
+        }
+        assert.equal(result.lineOffsets.length, intraday ? 6 : 0);
+        for (const offset of result.lineOffsets) assert.ok(Math.abs(offset) < 1, 'line column centre matches the day column: ' + offset);
+        assert.deepEqual(errors, []);
+      } finally { await page.close(); }
+    });
+  }
+}

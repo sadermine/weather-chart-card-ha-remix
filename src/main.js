@@ -1689,6 +1689,8 @@ buildChartConfig({ backgroundColor, textColor, dividerColor, rtl }) {
       backgroundColor: config.forecast.precipitation_color,
       barPercentage: config.forecast.precip_bar_size / 100,
       categoryPercentage: 1.0,
+      // Chart.js gives each x axis in use its own bar slot, so the intraday line's axis would halve the bars.
+      grouped: false,
       datalabels: {
         display: function (context) {
           // Hides the value printed on each bar; the bars themselves stay.
