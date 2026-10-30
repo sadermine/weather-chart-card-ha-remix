@@ -214,6 +214,8 @@ units:
 | extra_rows                     | list    | none                     | Extra rows of per-day values under the forecast, read from a list attribute of any entity (daily forecast only). See [Extra Rows](#extra-rows-per-day-values-from-a-sensor). |
 | highlight_today                | boolean | false                    | Highlight today's column in the daily forecast (soft background band, bold date label).            |
 | highlight_today_color          | string  | rgba(127,127,127,0.12)   | Colour of the today band.                                                                          |
+| intraday_line                  | boolean | false                    | Daily forecast only: replace the high and low lines with one line that follows the temperature through each day. YAML only. See [Intraday Line](#intraday-line). |
+| intraday_entity                | string  | none                     | Entity whose `daily` attribute holds OpenWeatherMap One Call 3.0 daily entries, for the four-a-day part of the intraday line. YAML only. |
 
 ### Units of Measurement
 
@@ -421,6 +423,28 @@ forecast:
   highlight_today: true
   highlight_today_color: 'rgba(255, 193, 7, 0.15)'   # optional
 ```
+
+### Intraday Line
+The daily chart gives each day one high and one low, so it cannot show whether a day's low comes in the morning or late at night.
+With `intraday_line: true`, the chart replaces the high and low lines with one line that follows the temperature through each day.
+Each day's part of the line is drawn in that day's column. The rain bars, icons and wind row do not change.
+```yaml
+type: custom:weather-chart-card-ha
+entity: weather.openweathermap
+forecast:
+  type: daily
+  intraday_line: true
+  intraday_entity: sensor.openweathermap_one_call_daily   # optional
+```
+The line has three parts:
+
+- **Actual**: the weather entity's recorded `temperature` from midnight today until now, in `temperature1_color`. The card reads the history once when it loads, then adds each new state of the entity. If the history is empty or cannot be read, the line starts at now.
+- **Hourly forecast**: the weather entity's hourly forecast, in `temperature2_color`.
+- **Four a day**: after the hourly forecast ends, the `temp.morn`, `temp.day`, `temp.eve` and `temp.night` values of each `intraday_entity` entry, drawn at 6 AM, noon, 6 PM and 11 PM local time. Dashed, in `temperature2_color`. Each entry's `temp.min` and `temp.max` add an estimated point, so the line reaches the day's low and high. These temperatures must be in the hourly forecast's unit. Without `intraday_entity`, the line ends where the hourly forecast ends.
+
+Each day shows two numbers: its highest and lowest point on the line, in the colour of that part of the line.
+When two days' numbers overlap, each moves into its own day's column. If they still overlap, only the lower low (or the higher high) stays.
+The hourly view does not change.
 
 ### Custom Icon Sizes
 Fine-tune icon sizes for your layout:
