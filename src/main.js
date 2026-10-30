@@ -19,6 +19,7 @@ import ChartDataLabels from 'chartjs-plugin-datalabels';
 // The intraday chart's rain band: the height of each half, either side of its mid line, and of the whole band.
 const RAIN_HALF = 40;
 const RAIN_BAND_HEIGHT = 2 * RAIN_HALF + 30;
+const BASELINE_COLOR = 'rgba(128, 128, 128, 0.2)';
 Chart.register(...registerables, ChartDataLabels);
 
 // Injected by the rollup build from package.json; 'dev' when run unbundled (tests).
@@ -1978,11 +1979,12 @@ buildChartConfig({ backgroundColor, textColor, dividerColor, rtl }) {
           suggestedMax: precipMax,
           beginAtZero: true,
           grid: {
-            display: true,
+            // The intraday plugin draws its own line under the chart.
+            display: !data.intraday,
             drawOnChartArea: true,
             drawTicks: false,
             lineWidth: (context) => context.tick.value === 0 ? 1 : 0,
-            color: (context) => context.tick.value === 0 ? 'rgba(128, 128, 128, 0.2)' : 'transparent',
+            color: (context) => context.tick.value === 0 ? BASELINE_COLOR : 'transparent',
           },
           ticks: {
             display: false,
@@ -2202,17 +2204,24 @@ buildIntradayPlugin({ backgroundColor, textColor, dividerColor, chartTextColor, 
     const bandBottom = mid + RAIN_HALF;
     const up = (chance) => mid - Math.min(100, chance) / 100 * RAIN_HALF;
     const down = (amount) => mid + Math.min(1, amount / hourFull) * RAIN_HALF;
-    const vertical = (x) => {
+    const vertical = (x, top = bandTop) => {
       c.beginPath();
-      c.moveTo(x, bandTop);
+      c.moveTo(x, top);
       c.lineTo(x, bandBottom);
+      c.stroke();
+    };
+    const horizontal = (y) => {
+      c.beginPath();
+      c.moveTo(area.left, y);
+      c.lineTo(area.right, y);
       c.stroke();
     };
     c.save();
 
     c.strokeStyle = dividerColor;
     c.lineWidth = 1;
-    view.columns.slice(1).forEach(({ left }) => vertical(left));
+    // Day dividers carry on from the chart's grid down through the band.
+    view.columns.slice(1).forEach(({ left }) => vertical(left, area.bottom));
     if (rain.hourly) {
       c.setLineDash([2, 2]);
       vertical(view.xScale.getPixelForValue(rain.hourly.x0));
@@ -2239,13 +2248,13 @@ buildIntradayPlugin({ backgroundColor, textColor, dividerColor, chartTextColor, 
     }
 
     c.save();
+    c.strokeStyle = BASELINE_COLOR;
+    c.lineWidth = 1;
+    horizontal(mid);
     c.strokeStyle = textColor;
     c.globalAlpha = 0.5;
     c.lineWidth = 1.5;
-    c.beginPath();
-    c.moveTo(area.left, mid);
-    c.lineTo(area.right, mid);
-    c.stroke();
+    horizontal(area.bottom);
     c.globalAlpha = 0.6;
     c.fillStyle = textColor;
     c.font = font(10, false);

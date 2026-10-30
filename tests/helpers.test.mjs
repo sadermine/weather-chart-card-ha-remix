@@ -530,6 +530,7 @@ test('#2 criterion 5: with intraday_line the high and low lines give way to the 
   assert.ok(!datasets.some((d) => d.label === card.ll('tempHi') || d.label === card.ll('tempLo')), 'no high or low line');
   assert.ok(!datasets.some((d) => d.type === 'bar'), 'no rain bars');
   assert.ok(config.options.layout.padding.bottom >= 100, 'room for the rain band under the line');
+  assert.equal(config.options.scales.PrecipAxis.grid.display, false, 'the band draws the line under the chart');
   const lines = datasets.filter((d) => d.type === 'line');
   assert.deepEqual(lines.map((d) => d.data.at(-1).part), ['actual', 'hourly', 'fourADay']);
   assert.deepEqual(lines.map((d) => [d.borderColor, d.borderDash.length > 0]), [['orange', false], ['blue', false], ['blue', true]]);
@@ -547,7 +548,7 @@ function recordingContext() {
     setLineDash(d) { dash = d; },
     moveTo(x, y) { segment.push([x, y]); },
     lineTo(x, y) { segment.push([x, y]); },
-    stroke() { drawn.strokes.push({ segment, dash, color: ctx.strokeStyle }); },
+    stroke() { drawn.strokes.push({ segment, dash, color: ctx.strokeStyle, width: ctx.lineWidth }); },
     measureText: (text) => ({ width: text.length * 6 }),
     fillText(text, x, y) { drawn.texts.push({ text: text.replace(/[\u2066\u2069]/g, ''), x, y, color: ctx.fillStyle }); },
     fillRect(x, y, width, height) { drawn.rects.push({ x, y, width, height, color: ctx.fillStyle, alpha: ctx.globalAlpha }); },
@@ -643,6 +644,15 @@ test('#2 rain band: chance grows up from the mid line, amount down, and each hou
   const dayBar = drawn.rects.find((r) => r.width > 90 && r.alpha === 0.5);
   assert.deepEqual([dayBar.y, dayBar.height], [mid - 32, 32], 'a daily-only day shows its chance as one bar across the day');
   assert.ok(!drawn.rects.some((r) => r.width > 90 && r.alpha === 1 && r.color === 'blue'), 'and no amount bar');
+
+  const horizontals = drawn.strokes.filter(({ segment: [a, b] }) => a[1] === b[1] && a[0] === 0 && b[0] === 800)
+    .map(({ segment, color, width }) => [segment[0][1], color, width]);
+  assert.deepEqual(horizontals, [
+    [mid, 'rgba(128, 128, 128, 0.2)', 1],
+    [300, chartTheme.textColor, 1.5],
+  ], 'a faint mid line, and a stronger line between the chart and the band');
+  const dividers = drawn.strokes.filter(({ segment: [a, b], dash }) => a[0] === b[0] && !dash.length).map(({ segment }) => [segment[0][0], segment[0][1], segment[1][1]]);
+  assert.deepEqual(dividers.slice(0, 2), [[100, 300, mid + 40], [200, 300, mid + 40]], 'day dividers run from the chart down through the band');
 
   const texts = drawn.texts.filter((d) => !d.text.endsWith('°')).map(({ text, x }) => [text, Math.round(x)]);
   assert.deepEqual(texts.filter(([text]) => text.includes('%') || text.includes('mm')), [

@@ -448,7 +448,7 @@ Each day shows two numbers: its highest and lowest point on the line, in whole d
 A faint dotted line runs across each day's column at its high and at its low, with a dot where the line reaches it.
 The numbers sit where the day starts (the left of its column, or the right in RTL): the high above its dotted line and the low below. Where the line passes through a number, the number moves further up (a high) or down (a low).
 
-The rain band has a mid line. The chance of rain grows up from it, and 100% fills the top half. The amount grows down from it.
+The rain band sits under a solid line that closes off the chart, and the day dividers run down through it. It has a faint mid line. The chance of rain grows up from it, and 100% fills the top half. The amount grows down from it.
 
 - **Today until the current hour**: the rain measured each hour by `intraday_rain_entity`, as bars in `temperature1_color`. A rate sensor is added up over each hour; any other unit is read as a running total, and a drop is a reset. The card reads the sensor's history once when it loads, then adds each new state. Without `intraday_rain_entity`, these hours stay empty.
 - **Hourly forecast**: one bar per hour for the chance and one for the amount, in `precipitation_color`. An hour's amount fills the bottom half at 0.1 in (2.54 mm).
