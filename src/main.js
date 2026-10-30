@@ -7,11 +7,18 @@ import {
   WeatherEntityFeature
 } from './const.js';
 import { DEFAULTS, FORECAST_DEFAULTS, UNITS_DEFAULTS } from './defaults.js';
-import { INTRADAY_PARTS, buildIntradayLine, dayLabels, localDateHour, localMidnight, placeLabels, splitParts } from './intraday.js';
+import {
+  INTRADAY_PARTS, buildIntradayLine, buildRainBand, dayLabels, hourlyRainfall, lineExtent, localDateHour, localMidnight,
+  numberTop, splitParts,
+} from './intraday.js';
 import {LitElement, html} from 'lit';
 import './weather-chart-card-editor.js';
 import {Chart, registerables} from 'chart.js';
 import ChartDataLabels from 'chartjs-plugin-datalabels';
+
+// The intraday chart's rain band: the height of each half, either side of its mid line, and of the whole band.
+const RAIN_HALF = 40;
+const RAIN_BAND_HEIGHT = 2 * RAIN_HALF + 30;
 Chart.register(...registerables, ChartDataLabels);
 
 // Injected by the rollup build from package.json; 'dev' when run unbundled (tests).
@@ -166,6 +173,7 @@ set hass(hass) {
 
   if (this.intradayActive()) {
     this.trackIntradayActual(hass);
+    this.trackIntradayRain(hass);
     const fourADayState = hass.states[this.config.forecast.intraday_entity];
     if (fourADayState !== this._fourADayState) {
       this._fourADayState = fourADayState;
@@ -234,7 +242,22 @@ trackIntradayActual(hass) {
 }
 
 async loadIntradayHistory(hass, entityId) {
-  let history;
+  const history = await this.readTodayHistory(hass, entityId, true);
+  if (!history || !this._actualTemps || this._actualTemps.entityId !== entityId) {
+    return;
+  }
+  const recorded = history
+    .map((state) => ({ time: state.lu * 1000, value: state.a && state.a.temperature }))
+    .filter((r) => Number.isFinite(r.time) && Number.isFinite(r.value));
+  const lastRecorded = recorded.length ? recorded[recorded.length - 1].time : -Infinity;
+  this._actualTemps.readings = [...recorded, ...this._actualTemps.readings.filter((r) => r.time > lastRecorded)];
+  if (this.forecastChart) {
+    this.updateChart();
+  }
+}
+
+/** The entity's recorded states from local midnight, or null when they cannot be read. */
+async readTodayHistory(hass, entityId, withAttributes) {
   try {
     const result = await hass.callWS({
       type: 'history/history_during_period',
@@ -245,21 +268,55 @@ async loadIntradayHistory(hass, entityId) {
       // which the recorder treats as insignificant.
       significant_changes_only: false,
       minimal_response: false,
-      no_attributes: false,
+      no_attributes: !withAttributes,
     });
-    history = (result && result[entityId]) || [];
+    return (result && result[entityId]) || [];
   } catch (error) {
-    console.warn(`weather-chart-card-ha: cannot read the history of ${entityId}; the intraday line starts at now.`, error);
+    console.warn(`weather-chart-card-ha: cannot read the history of ${entityId}; the intraday chart starts at now.`, error);
+    return null;
+  }
+}
+
+/**
+ * Today's states of the rain sensor, in its own unit: its recorded history
+ * from local midnight, read once, then each new state.
+ */
+trackIntradayRain(hass) {
+  const entityId = this.config.forecast.intraday_rain_entity;
+  if (!entityId) {
+    this._actualRain = null;
     return;
   }
-  if (!this._actualTemps || this._actualTemps.entityId !== entityId) {
+  const stateObj = hass.states[entityId];
+  if (!this._actualRain || this._actualRain.entityId !== entityId) {
+    this._actualRain = { entityId, readings: [], lastState: stateObj };
+    this.loadRainHistory(hass, entityId);
+  }
+  if (!stateObj || stateObj === this._actualRain.lastState) {
+    return;
+  }
+  this._actualRain.lastState = stateObj;
+  const reading = { time: Date.parse(stateObj.last_updated), value: parseFloat(stateObj.state) };
+  const readings = this._actualRain.readings;
+  const last = readings[readings.length - 1];
+  if (Number.isFinite(reading.time) && (!last || reading.time > last.time)) {
+    this._actualRain.readings = [...readings, reading];
+    if (this.forecastChart) {
+      this.updateChart();
+    }
+  }
+}
+
+async loadRainHistory(hass, entityId) {
+  const history = await this.readTodayHistory(hass, entityId, false);
+  if (!history || !this._actualRain || this._actualRain.entityId !== entityId) {
     return;
   }
   const recorded = history
-    .map((state) => ({ time: state.lu * 1000, value: state.a && state.a.temperature }))
-    .filter((r) => Number.isFinite(r.time) && Number.isFinite(r.value));
+    .map((state) => ({ time: state.lu * 1000, value: parseFloat(state.s) }))
+    .filter((r) => Number.isFinite(r.time));
   const lastRecorded = recorded.length ? recorded[recorded.length - 1].time : -Infinity;
-  this._actualTemps.readings = [...recorded, ...this._actualTemps.readings.filter((r) => r.time > lastRecorded)];
+  this._actualRain.readings = [...recorded, ...this._actualRain.readings.filter((r) => r.time > lastRecorded)];
   if (this.forecastChart) {
     this.updateChart();
   }
@@ -1782,8 +1839,9 @@ buildChartConfig({ backgroundColor, textColor, dividerColor, rtl }) {
 
   const plugins = [];
   if (data.intraday) {
-    datasets = [...this.buildIntradayDatasets(data.intraday), datasets[2]];
-    plugins.push(this.buildIntradayLabelsPlugin(textColor));
+    // The rain band under the line takes the place of the precipitation bars.
+    datasets = this.buildIntradayDatasets(data.intraday);
+    plugins.push(this.buildIntradayPlugin({ backgroundColor, textColor, dividerColor, chartTextColor: chart_text_color || textColor, rtl }));
   }
 
   // Optional: mark today's column (daily forecasts only) with a soft band and a bold date label.
@@ -1829,7 +1887,7 @@ buildChartConfig({ backgroundColor, textColor, dividerColor, rtl }) {
       animation: config.forecast.disable_animation === true ? { duration: 0 } : {},
       layout: {
         padding: {
-          bottom: 10,
+          bottom: data.intraday ? RAIN_BAND_HEIGHT : 10,
         },
       },
       scales: {
@@ -2041,89 +2099,232 @@ buildIntradayDatasets(points) {
 }
 
 /**
- * Draws each day's high and low number at its highest and lowest point on the
- * intraday line, sliding numbers that collide into their own day's column.
- * A dotted guide marks each day's high and low across its column, over the rain
- * bars and under the line.
+ * Draws the intraday chart's extras. Under the line, a dotted guide across each
+ * day's column at its high and low. Over it, a dot at each extreme and its
+ * number where the day starts (the left, or the right in RTL), the high above
+ * its guide and the low below.
+ * Under the chart, the rain band: chance grows up from the mid line and amount
+ * down, hour by hour where hours are known, with each such day's peak hour
+ * guided and numbered the same way.
  */
-buildIntradayLabelsPlugin(guideColor) {
+buildIntradayPlugin({ backgroundColor, textColor, dividerColor, chartTextColor, rtl }) {
   const self = this;
+  const forecast = this.config.forecast;
   const colors = this.getIntradayColors();
-  const fontSize = parseInt(this.config.forecast.labels_font_size) + 1;
-  const offset = 4;
+  const rainColor = forecast.precipitation_color;
+  const actualRainColor = forecast.temperature1_color;
+  const fontSize = parseInt(forecast.labels_font_size) + 1;
+  const boxFontSize = parseInt(forecast.labels_font_size);
+  const boxHeight = boxFontSize + 6;
+  const gap = 4;
+  const rainGap = 3;
   const guideInset = 3;
+  const numberInset = 4;
+  const displayUnit = this.getDisplayPrecipitationUnit();
+  const unitLabel = this.ll('units')[displayUnit] || displayUnit;
+  // An hour's amount fills half the band at 0.1 in, so a shower shows beside a day's total.
+  const hourFull = Number(this.convertPrecipitation(0.1, 'in', displayUnit));
+  const hourDecimals = this.normalizePrecipitationUnit(displayUnit) === 'in' ? 2 : 1;
+  const hourAmount = (value) => `${value.toFixed(hourDecimals)} ${unitLabel}`;
+  const dayAmount = (value) => `${value > 9 ? Math.round(value) : value.toFixed(1)} ${unitLabel}`;
+  const font = (size, bold) => `${bold ? 'bold ' : ''}${size}px ${Chart.defaults.font.family}`;
+
   const layout = (chart) => {
-    const points = self._chartData && self._chartData.intraday;
+    const data = self._chartData;
     const xScale = chart.scales.intradayX;
     const yScale = chart.scales.TempAxis;
-    if (!points || !points.length || !xScale || !yScale) {
+    if (!data || !data.intraday || !data.intraday.length || !xScale || !yScale) {
       return null;
     }
-    const columnCount = chart.data.labels.length;
-    const columns = Array.from({ length: columnCount }, (_, column) => {
-      const a = xScale.getPixelForValue(column - 0.5);
-      const b = xScale.getPixelForValue(column + 0.5);
+    const span = (x0, x1) => {
+      const a = xScale.getPixelForValue(x0);
+      const b = xScale.getPixelForValue(x1);
       return { left: Math.min(a, b), right: Math.max(a, b) };
-    });
-    return { columns, xScale, yScale, labels: dayLabels(points, columnCount, colors) };
+    };
+    const columnCount = chart.data.labels.length;
+    const columns = Array.from({ length: columnCount }, (_, column) => span(column - 0.5, column + 0.5));
+    return { data, xScale, yScale, columns, span, labels: dayLabels(data.intraday, columnCount, colors) };
   };
+  const guide = (c, left, right, y) => {
+    c.save();
+    c.strokeStyle = textColor;
+    c.globalAlpha = 0.45;
+    c.lineWidth = 1.2;
+    c.lineCap = 'round';
+    c.setLineDash([1.5, 3.5]);
+    c.beginPath();
+    c.moveTo(left + guideInset, y);
+    c.lineTo(right - guideInset, y);
+    c.stroke();
+    c.restore();
+  };
+  // A day's numbers sit where it starts: its column's left edge, or its right in RTL.
+  const numberX = (column, width) => (rtl ? column.right - numberInset - width : column.left + numberInset);
+  const number = (c, text, column, top, color, bold) => {
+    c.font = font(fontSize, bold);
+    const label = self.renderBidiMeasurement(text);
+    c.fillStyle = color;
+    c.textAlign = 'left';
+    c.textBaseline = 'top';
+    c.fillText(label, numberX(column, c.measureText(label).width), top);
+  };
+  const box = (c, text, cx, top) => {
+    c.font = font(boxFontSize, true);
+    const label = self.renderBidiMeasurement(text);
+    const width = c.measureText(label).width + 8;
+    c.fillStyle = backgroundColor;
+    c.strokeStyle = rainColor;
+    c.lineWidth = 1.5;
+    c.fillRect(cx - width / 2, top, width, boxHeight);
+    c.strokeRect(cx - width / 2, top, width, boxHeight);
+    c.fillStyle = chartTextColor;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText(label, cx, top + boxHeight / 2);
+  };
+  const bar = (c, color, alpha, x, y0, width, y1) => {
+    c.globalAlpha = alpha;
+    c.fillStyle = color;
+    c.fillRect(x, Math.min(y0, y1), width, Math.abs(y1 - y0));
+    c.globalAlpha = 1;
+  };
+
+  const drawRainBand = (chart, view) => {
+    const rain = view.data.rain;
+    const area = chart.chartArea;
+    if (!rain || !area) {
+      return;
+    }
+    const c = chart.ctx;
+    const bandTop = area.bottom + 12;
+    const mid = bandTop + RAIN_HALF;
+    const bandBottom = mid + RAIN_HALF;
+    const up = (chance) => mid - Math.min(100, chance) / 100 * RAIN_HALF;
+    const down = (amount) => mid + Math.min(1, amount / hourFull) * RAIN_HALF;
+    const vertical = (x) => {
+      c.beginPath();
+      c.moveTo(x, bandTop);
+      c.lineTo(x, bandBottom);
+      c.stroke();
+    };
+    c.save();
+
+    c.strokeStyle = dividerColor;
+    c.lineWidth = 1;
+    view.columns.slice(1).forEach(({ left }) => vertical(left));
+    if (rain.hourly) {
+      c.setLineDash([2, 2]);
+      vertical(view.xScale.getPixelForValue(rain.hourly.x0));
+      vertical(view.xScale.getPixelForValue(rain.hourly.x1));
+      c.setLineDash([]);
+    }
+
+    for (const span of rain.spans) {
+      if (span.chance > 0) {
+        const { left, right } = view.span(span.x0, span.x1);
+        bar(c, rainColor, 0.5, left + 1, mid, right - left - 2, up(span.chance));
+      }
+    }
+    for (const slot of rain.slots) {
+      const { left, right } = view.span(slot.x0, slot.x1);
+      const x = left + 0.6;
+      const width = Math.max(1, right - left - 1.2);
+      if (slot.chance > 0) {
+        bar(c, rainColor, 0.5, x, mid, width, up(slot.chance));
+      }
+      if (slot.amount > 0) {
+        bar(c, slot.kind === 'actual' ? actualRainColor : rainColor, 1, x, mid, width, down(slot.amount));
+      }
+    }
+
+    c.save();
+    c.strokeStyle = textColor;
+    c.globalAlpha = 0.5;
+    c.lineWidth = 1.5;
+    c.beginPath();
+    c.moveTo(area.left, mid);
+    c.lineTo(area.right, mid);
+    c.stroke();
+    c.globalAlpha = 0.6;
+    c.fillStyle = textColor;
+    c.font = font(10, false);
+    // At the end of the time axis, away from today's numbers.
+    c.textAlign = rtl ? 'left' : 'right';
+    const captionX = rtl ? area.left + 4 : area.right - 4;
+    c.textBaseline = 'top';
+    c.fillText(self.ll('rainChance'), captionX, bandTop);
+    c.textBaseline = 'bottom';
+    c.fillText(self.ll('rainAmount'), captionX, bandBottom);
+    c.restore();
+
+    for (const peak of rain.peaks) {
+      const { left, right } = view.span(peak.x0, peak.x1);
+      const column = view.columns[peak.column];
+      if (peak.chance > 0) {
+        guide(c, left, right, up(peak.chance));
+        number(c, `${Math.round(peak.chance)}%`, column, numberTop('up', up(peak.chance), fontSize, rainGap), rainColor, true);
+      }
+      if (peak.amount > 0) {
+        guide(c, left, right, down(peak.amount));
+        const top = Math.min(chart.height - fontSize, numberTop('down', down(peak.amount), fontSize, rainGap));
+        number(c, hourAmount(peak.amount), column, top, rainColor, true);
+      }
+    }
+
+    if (forecast.show_precipitation_labels !== false) {
+      for (const span of rain.spans) {
+        const { left, right } = view.span(span.x0, span.x1);
+        const cx = (left + right) / 2;
+        if (span.chance > 0) {
+          box(c, `${Math.round(span.chance)}%`, cx, mid - 4 - boxHeight);
+        }
+        if (span.amount > 0) {
+          box(c, dayAmount(span.amount), cx, mid + 4);
+        }
+      }
+    }
+    c.restore();
+  };
+
   return {
     id: 'intradayLabels',
-    // With no dataset setting `order`, Chart.js draws the last dataset first, so the rain bars are already down and the line is not.
-    afterDatasetDraw(chart, { index }) {
-      const view = chart.data.datasets[index].key === 'precip' && layout(chart);
+    beforeDatasetsDraw(chart) {
+      const view = layout(chart);
       if (!view) {
         return;
       }
-      const c = chart.ctx;
-      c.save();
-      c.strokeStyle = guideColor;
-      c.globalAlpha = 0.45;
-      c.lineWidth = 1.2;
-      c.lineCap = 'round';
-      c.setLineDash([1.5, 3.5]);
       for (const label of view.labels) {
         const { left, right } = view.columns[label.column];
-        const y = view.yScale.getPixelForValue(label.point.y);
-        c.beginPath();
-        c.moveTo(left + guideInset, y);
-        c.lineTo(right - guideInset, y);
-        c.stroke();
+        guide(chart.ctx, left, right, view.yScale.getPixelForValue(label.point.y));
       }
-      c.restore();
     },
     afterDatasetsDraw(chart) {
       const view = layout(chart);
       if (!view) {
         return;
       }
-      const { columns, xScale, yScale } = view;
+      const { columns, xScale, yScale, data } = view;
       const c = chart.ctx;
       c.save();
-      c.font = `${fontSize}px ${Chart.defaults.font.family}`;
-      c.textAlign = 'center';
-      c.textBaseline = 'top';
-      const labels = view.labels.map((label) => {
-        const px = xScale.getPixelForValue(label.point.x);
-        const py = yScale.getPixelForValue(label.point.y);
-        const text = self.renderBidiMeasurement(label.value + '°');
-        return {
-          ...label, px, py, text, cx: px,
-          width: c.measureText(text).width,
-          height: fontSize,
-          top: label.kind === 'high' ? py - offset - fontSize : py + offset,
-        };
-      });
-      for (const label of placeLabels(labels, columns, chart.chartArea)) {
-        if (!label.visible) {
-          continue;
-        }
+      for (const label of view.labels) {
+        const text = label.value + '°';
+        const column = columns[label.column];
+        c.font = font(fontSize, false);
+        const width = c.measureText(self.renderBidiMeasurement(text)).width;
+        const x = numberX(column, width);
+        const a = xScale.getValueForPixel(x);
+        const b = xScale.getValueForPixel(x + width);
+        const extent = lineExtent(data.intraday, Math.min(a, b), Math.max(a, b));
+        const line = extent && { top: yScale.getPixelForValue(extent.max), bottom: yScale.getPixelForValue(extent.min) };
+        const guideY = yScale.getPixelForValue(label.point.y);
+        const top = numberTop(label.kind === 'high' ? 'up' : 'down', guideY, fontSize, gap, line);
         c.fillStyle = label.color;
         c.beginPath();
-        c.arc(label.px, label.py, 2.5, 0, 2 * Math.PI);
+        c.arc(xScale.getPixelForValue(label.point.x), guideY, 2.5, 0, 2 * Math.PI);
         c.fill();
-        c.fillText(label.text, label.cx, label.top);
+        number(c, text, column, Math.max(0, top), label.color, false);
       }
+      drawRainBand(chart, view);
       c.restore();
     },
   };
@@ -2221,6 +2422,7 @@ computeForecastData({ config, forecastItems } = this) {
   };
   if (this.intradayActive()) {
     data.intraday = this.computeIntradayLine(dateTime);
+    data.rain = this.computeRainBand(dateTime, forecast);
   }
   return data;
 }
@@ -2265,6 +2467,40 @@ computeIntradayLine(dateTime) {
 
   const columns = dateTime.map((datetime) => localDateHour(Date.parse(datetime), timeZone).date);
   return buildIntradayLine({ columns, actual, hourly, daily, now, timeZone });
+}
+
+/**
+ * The intraday chart's rain band, in the display unit: today's measured rain
+ * per hour from `intraday_rain_entity`, the hourly forecast's chance and
+ * amount, then each day's forecast for the hours left.
+ */
+computeRainBand(dateTime, forecast) {
+  const displayUnit = this.getDisplayPrecipitationUnit();
+  const toDisplay = (value, unit) => Number(this.convertPrecipitation(value, unit, displayUnit));
+  const timeZone = this.getTimezone();
+  const now = Date.now();
+
+  let actual = [];
+  const rain = this._actualRain;
+  const rainState = rain && this._hass && this._hass.states[rain.entityId];
+  if (rainState) {
+    // A rate (in/h, mm/h) is integrated over time; any other unit is read as a running total.
+    const unit = String(rainState.attributes.unit_of_measurement || '');
+    const rate = /\/\s*hr?$/i;
+    actual = hourlyRainfall(rain.readings, { now, isRate: rate.test(unit), timeZone })
+      .map((hour) => ({ time: hour.time, amount: toDisplay(hour.amount, unit.replace(rate, '')) }));
+  }
+
+  const hourlyUnit = this.getForecastEntityAttributes('hourly').precipitation_unit || this.getSourcePrecipitationUnit();
+  const hourly = ((this._forecastCache && this._forecastCache.hourly) || [])
+    .map((item) => ({ time: Date.parse(item.datetime), chance: item.precipitation_probability, amount: toDisplay(item.precipitation, hourlyUnit) }))
+    .filter((hour) => Number.isFinite(hour.time));
+
+  const dailyUnit = this.getSourcePrecipitationUnit();
+  const daily = forecast.map((item) => ({ chance: item.precipitation_probability, amount: toDisplay(item.precipitation, dailyUnit) }));
+
+  const columns = dateTime.map((datetime) => localDateHour(Date.parse(datetime), timeZone).date);
+  return buildRainBand({ columns, actual, hourly, daily, now, timeZone });
 }
 
 updateChart({ forecasts, forecastChart } = this) {
@@ -2413,7 +2649,7 @@ updateChart({ forecasts, forecastChart } = this) {
         }
         .chart-container {
           position: relative;
-          height: ${config.forecast.chart_height}px;
+          height: ${config.forecast.chart_height + (this.intradayActive() ? RAIN_BAND_HEIGHT : 0)}px;
           width: 100%;
           direction: ltr;
           margin-top: ${forecastOnly && config.show_forecast_toggle ? '40px' : '0px'};

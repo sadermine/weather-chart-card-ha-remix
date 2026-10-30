@@ -153,41 +153,111 @@ export function dayLabels(points, columnCount, colors) {
   return labels;
 }
 
-const LABEL_GAP = 1;
-
-function overlaps(a, b) {
-  return Math.abs(a.cx - b.cx) < (a.width + b.width) / 2
-    && a.top < b.top + b.height && b.top < a.top + a.height;
+/**
+ * The highest and lowest value the line can take between x0 and x1. Monotone
+ * interpolation keeps each segment between its two points, so the points inside
+ * the range and the one on either side of it bound the line there.
+ */
+export function lineExtent(points, x0, x1) {
+  const before = points.filter((p) => p.x < x0).at(-1);
+  const after = points.find((p) => p.x > x1);
+  const near = [before, ...points.filter((p) => p.x >= x0 && p.x <= x1), after].filter(Boolean);
+  if (!near.length) return null;
+  const ys = near.map((p) => p.y);
+  return { min: Math.min(...ys), max: Math.max(...ys) };
 }
 
 /**
- * Final horizontal centre and visibility of each label, in pixels. A label is
- * `{ column, kind, value, cx, top, width, height }`; `columns[i]` is
- * `{ left, right }` of day column i and `area` the chart's `{ left, right }`.
- * When two days' labels of the same kind overlap, each slides into its own
- * column; if they still overlap, only the lower low or the higher high stays.
+ * Top of a number `height` tall that sits `gap` above (`up`) or below (`down`)
+ * its guide at `guideY`, in pixels. Where the line, from `lineTop` to
+ * `lineBottom`, passes through it, the number moves further out the same way.
  */
-export function placeLabels(labels, columns, area) {
-  const placed = labels.map((label) => ({
-    ...label,
-    cx: Math.min(area.right - label.width / 2, Math.max(area.left + label.width / 2, label.cx)),
-    visible: true,
-  }));
-  for (let i = 0; i < placed.length; i++) {
-    for (let j = i + 1; j < placed.length; j++) {
-      const a = placed[i];
-      const b = placed[j];
-      if (!a.visible || !b.visible || a.kind !== b.kind || a.column === b.column || !overlaps(a, b)) continue;
-      const [left, right] = columns[a.column].left < columns[b.column].left ? [a, b] : [b, a];
-      const leftColumn = columns[left.column];
-      const rightColumn = columns[right.column];
-      left.cx = Math.min(left.cx, Math.max(leftColumn.right - LABEL_GAP - left.width / 2, (leftColumn.left + leftColumn.right) / 2));
-      right.cx = Math.max(right.cx, Math.min(rightColumn.left + LABEL_GAP + right.width / 2, (rightColumn.left + rightColumn.right) / 2));
-      if (overlaps(left, right)) {
-        const keepA = a.kind === 'high' ? a.value >= b.value : a.value <= b.value;
-        (keepA ? b : a).visible = false;
-      }
-    }
+export function numberTop(direction, guideY, height, gap, line) {
+  let top = direction === 'up' ? guideY - gap - height : guideY + gap;
+  if (line && line.top < top + height && line.bottom > top) {
+    top = direction === 'up' ? line.top - gap - height : line.bottom + gap;
   }
-  return placed;
+  return top;
+}
+
+const RATE_STEP_MS = 15 * 60 * 1000;
+
+/**
+ * Rain per local hour, `[{ time, amount }]` with `time` the hour's first
+ * instant. A rate sensor's readings (per hour) are integrated until `now`; a
+ * total's rises are summed, and a fall is a reset, so the new value counts.
+ */
+export function hourlyRainfall(readings, { now, isRate, timeZone }) {
+  const hours = new Map();
+  const add = (time, amount) => {
+    const { hour } = localDateHour(time, timeZone);
+    const start = Math.round((time - (hour % 1) * HOUR_MS) / 1000) * 1000;
+    hours.set(start, (hours.get(start) || 0) + amount);
+  };
+  const known = isRate ? readings : readings.filter((r) => Number.isFinite(r.value));
+  known.forEach((reading, i) => {
+    if (isRate) {
+      const end = Math.min(now, i + 1 < known.length ? known[i + 1].time : now);
+      // An unavailable sensor counts as no rain, so the hour still shows as measured.
+      // Every zone's offset is a whole number of quarter hours, so no step spans two local hours.
+      for (let t = reading.time; t < end;) {
+        const next = Math.min(end, (Math.floor(t / RATE_STEP_MS) + 1) * RATE_STEP_MS);
+        add(t, (reading.value > 0 ? reading.value : 0) * (next - t) / HOUR_MS);
+        t = next;
+      }
+    } else if (i > 0) {
+      const rise = reading.value - known[i - 1].value;
+      add(reading.time, rise >= 0 ? rise : reading.value);
+    }
+  });
+  return [...hours].map(([time, amount]) => ({ time, amount })).sort((a, b) => a.time - b.time);
+}
+
+/**
+ * The rain band under the line. `slots` are hours: `actual` ones before the
+ * current hour, from `actual` (`{ time, amount }`), and `hourly` ones from the
+ * current hour on (`{ time, chance, amount }`). `spans` carry `daily[column]`
+ * (`{ chance, amount }`) over the rest of each day. `peaks` are each day's
+ * highest hourly chance and amount, across the hours it has. `hourly` is the
+ * x range the hourly forecast covers, or null.
+ */
+export function buildRainBand({ columns, actual = [], hourly = [], daily = [], now, timeZone }) {
+  const slot = (time, kind, chance, amount) => {
+    const place = placeInColumns(time, columns, timeZone);
+    return place ? [{ column: place.column, x0: place.x, x1: place.x + 1 / 24, kind, chance, amount }] : [];
+  };
+  const forecastSlots = hourly
+    .filter((h) => h.time + HOUR_MS > now)
+    .flatMap((h) => slot(h.time, 'hourly', h.chance, h.amount));
+  const firstForecast = Math.min(...hourly.filter((h) => h.time + HOUR_MS > now).map((h) => h.time));
+  const actualSlots = actual
+    .filter((a) => a.time <= now && a.time < firstForecast)
+    .flatMap((a) => slot(a.time, 'actual', null, a.amount));
+  const slots = [...actualSlots, ...forecastSlots].sort((a, b) => a.x0 - b.x0);
+
+  const nowPlace = placeInColumns(now, columns, timeZone);
+  const coveredUntil = Math.max(nowPlace ? nowPlace.x : -Infinity, ...slots.map((s) => s.x1));
+  const spans = daily.flatMap((day, column) => {
+    const x0 = Math.max(column - 0.5, coveredUntil);
+    return day && x0 < column + 0.5 ? [{ column, x0, x1: column + 0.5, chance: day.chance, amount: day.amount }] : [];
+  });
+
+  const peaks = [];
+  for (let column = 0; column < columns.length; column++) {
+    const own = slots.filter((s) => s.column === column);
+    if (!own.length) continue;
+    const top = (values) => Math.max(0, ...values.filter(Number.isFinite));
+    peaks.push({
+      column,
+      x0: own[0].x0,
+      x1: own.at(-1).x1,
+      chance: top(own.map((s) => s.chance)),
+      amount: top(own.map((s) => s.amount)),
+    });
+  }
+
+  const forecastRange = forecastSlots.length
+    ? { x0: Math.min(...forecastSlots.map((s) => s.x0)), x1: Math.max(...forecastSlots.map((s) => s.x1)) }
+    : null;
+  return { slots, spans, peaks, hourly: forecastRange };
 }

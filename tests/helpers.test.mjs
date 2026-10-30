@@ -300,7 +300,7 @@ test('config changes select the cached forecast before redrawing', async () => {
   assert.deepEqual(Object.keys(card._forecastSubscriptions), ['hourly']);
 });
 
-const { columnPosition, buildIntradayLine, dayLabels, placeLabels, localMidnight } = await import('../src/intraday.js');
+const { columnPosition, buildIntradayLine, buildRainBand, dayLabels, hourlyRainfall, lineExtent, localMidnight, numberTop } = await import('../src/intraday.js');
 const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 1e-9, `${message}: ${actual} != ${expected}`);
 const owmDay = (dt, [morn, day, eve, night], min, max) => ({ dt, temp: { morn, day, eve, night, min, max } });
 const noonUtc = (day) => Date.UTC(2026, 2, day, 12) / 1000;
@@ -401,19 +401,72 @@ test('#2 criterion 7: day numbers show whole degrees, whatever the source precis
   ]);
 });
 
-test('#2 criterion 7: overlapping numbers slide into their own columns, and only the lower low stays if that is not enough', () => {
-  const columns = [{ left: 0, right: 50 }, { left: 50, right: 100 }];
-  const area = { left: 0, right: 100 };
-  const label = (kind, column, value, cx, width) => ({ column, kind, value, cx, width, top: 100, height: 12 });
+test('#2 criterion 7: a number sits above or below its guide, and moves further out where the line passes through it', () => {
+  const points = [{ x: 0, y: 10 }, { x: 1, y: 20 }, { x: 2, y: 15 }, { x: 3, y: 30 }];
+  assert.deepEqual(lineExtent(points, 1.2, 1.8), { min: 15, max: 20 }, 'bounded by the points either side');
+  assert.deepEqual(lineExtent(points, 0.5, 2.5), { min: 10, max: 30 });
 
-  const slid = placeLabels([label('low', 0, 36, 47, 20), label('low', 1, 34, 53, 20)], columns, area);
-  assert.deepEqual(slid.map((l) => l.visible), [true, true]);
-  assert.ok(slid[0].cx + slid[0].width / 2 <= 50 && slid[1].cx - slid[1].width / 2 >= 50, 'each inside its own column');
+  assert.equal(numberTop('up', 100, 12, 4, null), 84, 'above the guide');
+  assert.equal(numberTop('down', 100, 12, 4, null), 104, 'below the guide');
+  assert.equal(numberTop('up', 100, 12, 4, { top: 100, bottom: 140 }), 84, 'a line under the number leaves it');
+  assert.equal(numberTop('up', 100, 12, 4, { top: 90, bottom: 140 }), 74, 'a line through it pushes it up');
+  assert.equal(numberTop('down', 100, 12, 4, { top: 60, bottom: 108 }), 112, 'a line through it pushes it down');
+});
 
-  const lows = placeLabels([label('low', 0, 36, 47, 70), label('low', 1, 34, 53, 70)], columns, area);
-  assert.deepEqual(lows.map((l) => l.visible), [false, true], 'the lower low stays');
-  const highs = placeLabels([label('high', 0, 50, 47, 70), label('high', 1, 48, 53, 70)], columns, area);
-  assert.deepEqual(highs.map((l) => l.visible), [true, false], 'the higher high stays');
+test('#2 measured rain: a rate is integrated per local hour until now, and a total counts its rises', () => {
+  const at = (h, m = 0) => Date.UTC(2026, 2, 10, h, m);
+  // 0.12 in/h from 05:30 to 06:15, then dry; Kathmandu is UTC+5:45.
+  const rate = [{ time: at(0), value: 0 }, { time: at(5, 30), value: 0.12 }, { time: at(6, 15), value: 0 }];
+  const utc = hourlyRainfall(rate, { now: at(7), isRate: true, timeZone: 'UTC' });
+  assert.deepEqual(utc.map((h) => h.time), [0, 1, 2, 3, 4, 5, 6].map((h) => at(h)), 'every hour since the first reading, dry ones included');
+  near(utc[5].amount, 0.06, '05:30 to 06:00');
+  near(utc[6].amount, 0.03, '06:00 to 06:15');
+  const kathmandu = hourlyRainfall(rate, { now: at(7), isRate: true, timeZone: 'Asia/Kathmandu' });
+  assert.ok(kathmandu.every((h) => new Date(h.time).getUTCMinutes() === 15), 'hours start at :15 UTC there');
+  near(kathmandu.find((h) => h.time === at(5, 15)).amount, 0.09, '05:30 to 06:15 is one Kathmandu hour');
+
+  const total = [{ time: at(0), value: 0.5 }, { time: at(1, 10), value: 0.6 }, { time: at(1, 50), value: 0.7 }, { time: at(2, 5), value: 0.1 }, { time: at(3), value: NaN }];
+  const totals = hourlyRainfall(total, { now: at(4), isRate: false, timeZone: 'UTC' });
+  assert.deepEqual(totals.map((h) => h.time), [at(1), at(2)]);
+  near(totals[0].amount, 0.2, 'two rises in one hour');
+  near(totals[1].amount, 0.1, 'a reset counts the new value');
+});
+
+test('#2 rain band: measured hours until the current hour, forecast hours from it, then each day\'s forecast for the hours left', () => {
+  const at = (day, h) => Date.UTC(2026, 2, 10 + day, h);
+  const now = at(0, 15) + 20 * 60 * 1000;
+  const actual = Array.from({ length: 16 }, (_, h) => ({ time: at(0, h), amount: h === 5 ? 0.04 : 0 }));
+  const hourly = Array.from({ length: 30 }, (_, k) => ({ time: at(0, 15 + k), chance: k === 20 ? 60 : 10, amount: k === 20 ? 0.03 : 0 }));
+  const daily = [{ chance: 85, amount: 0.1 }, { chance: 30, amount: 0.02 }, { chance: 0, amount: 0 }];
+  const band = buildRainBand({ columns: ['2026-03-10', '2026-03-11', '2026-03-12'], actual, hourly, daily, now, timeZone: 'UTC' });
+
+  const r = (v) => Math.round(v * 1e9) / 1e9;
+  const kinds = band.slots.map((slot) => slot.kind);
+  assert.deepEqual([kinds.filter((k) => k === 'actual').length, kinds.filter((k) => k === 'hourly').length], [15, 30], 'the current hour comes from the forecast');
+  assert.equal(band.slots.find((slot) => slot.kind === 'hourly').x0, columnPosition(0, 15));
+  assert.deepEqual([r(band.hourly.x0), r(band.hourly.x1)], [r(columnPosition(0, 15)), r(columnPosition(1, 21))]);
+  assert.deepEqual(band.spans.map(({ column, x0, x1, chance }) => [column, r(x0), x1, chance]), [
+    [1, r(columnPosition(1, 21)), 1.5, 30],
+    [2, 1.5, 2.5, 0],
+  ], 'today is covered; tomorrow takes its daily figures after 9 PM');
+  assert.deepEqual(band.peaks.map(({ column, x0, x1, chance, amount }) => [column, r(x0), r(x1), chance, amount]), [
+    [0, -0.5, 0.5, 10, 0.04],
+    [1, 0.5, r(columnPosition(1, 21)), 60, 0.03],
+  ], 'peaks cover measured and forecast hours, across the hours each day has');
+});
+
+test('#2 measured rain: the rain sensor history is read from local midnight, and its hours fill the band until the forecast starts', async (t) => {
+  const rainHistory = { 'sensor.rain': [{ s: '0', lu: MIDNIGHT / 1000 }, { s: '0.2', lu: (MIDNIGHT + 3 * HOUR) / 1000 }, { s: '0', lu: (MIDNIGHT + 4 * HOUR) / 1000 }] };
+  const history = (message) => (message.entity_ids[0] === 'sensor.rain' ? Promise.resolve(rainHistory) : recordedToday());
+  const { card, historyCalls } = await intradayCard(t, { intraday_rain_entity: 'sensor.rain' }, history);
+  assert.deepEqual(historyCalls.map((call) => [call.entity_ids[0], call.start_time, call.no_attributes]), [
+    ['weather.home', '2026-03-10T00:00:00.000Z', false],
+    ['sensor.rain', '2026-03-10T00:00:00.000Z', true],
+  ]);
+  const measured = card.computeForecastData().rain.slots.filter((slot) => slot.kind === 'actual');
+  assert.equal(measured.length, 23, 'midnight to the current hour; the forecast starts at 11 PM');
+  near(measured[3].amount, 0.2 * 25.4, '0.2 in/h for an hour, in millimetres');
+  assert.equal(measured[4].amount, 0);
 });
 
 const HOUR = 60 * 60 * 1000;
@@ -437,10 +490,11 @@ async function intradayCard(t, forecast, history) {
   card.hass = {
     states: {
       'weather.home': { state: 'cloudy', last_updated: new Date(NOW - 5 * 60 * 1000).toISOString(), attributes: { temperature: 12, temperature_unit: '°C', supported_features: 3 } },
+      'sensor.rain': { state: '0', last_updated: new Date(NOW - 60 * 60 * 1000).toISOString(), attributes: { unit_of_measurement: 'in/h' } },
       'sensor.owm': { state: 'ok', attributes: { daily: [3, 4, 5].map((day) => owmDay(noonUtc(10 + day), [5, 10, 8, 6], 4, 11)) } },
     },
     config: { time_zone: 'UTC', unit_system: { length: 'km', temperature: '°C' } },
-    callWS: (message) => { historyCalls.push(message); return history(); },
+    callWS: (message) => { historyCalls.push(message); return history(message); },
     connection: { subscribeMessage(callback, message) {
       callbacks[message.forecast_type] = callback;
       return Promise.resolve(() => {});
@@ -463,60 +517,124 @@ test('#2 criterion 4: without intraday_line the chart keeps its high, low and pr
   assert.deepEqual(Object.keys(chart.options.scales), ['x', 'TempAxis', 'PrecipAxis']);
 });
 
-test('#2 criterion 5: with intraday_line the high and low lines give way to the three parts of one line', async (t) => {
+test('#2 criterion 5: with intraday_line the high and low lines give way to the three parts of one line, and the rain bars to the band', async (t) => {
   const { card } = await intradayCard(t, { intraday_entity: 'sensor.owm', temperature1_color: 'orange', temperature2_color: 'blue' }, recordedToday);
-  const datasets = card.buildChartConfig(chartTheme).data.datasets;
+  const config = card.buildChartConfig(chartTheme);
+  const datasets = config.data.datasets;
   assert.ok(!datasets.some((d) => d.label === card.ll('tempHi') || d.label === card.ll('tempLo')), 'no high or low line');
-  assert.equal(datasets.filter((d) => d.type === 'bar' && d.label === card.ll('precip')).length, 1);
+  assert.ok(!datasets.some((d) => d.type === 'bar'), 'no rain bars');
+  assert.ok(config.options.layout.padding.bottom >= 100, 'room for the rain band under the line');
   const lines = datasets.filter((d) => d.type === 'line');
   assert.deepEqual(lines.map((d) => d.data.at(-1).part), ['actual', 'hourly', 'fourADay']);
   assert.deepEqual(lines.map((d) => [d.borderColor, d.borderDash.length > 0]), [['orange', false], ['blue', false], ['blue', true]]);
 });
 
-test('#2 a dotted guide marks the high and low of each day across its own column, over the rain bars and under the line', async (t) => {
-  const { card } = await intradayCard(t, { intraday_entity: 'sensor.owm' }, recordedToday);
-  const config = card.buildChartConfig(chartTheme);
-  const plugin = config.plugins.find((p) => p.id === 'intradayLabels');
-  card._chartData.intraday = [
-    { x: -0.4, y: 7.4, part: 'actual' }, { x: 0.2, y: 12.6, part: 'hourly' },
-    { x: 0.7, y: 10.3, part: 'hourly' }, { x: 1.3, y: 4.6, part: 'fourADay' },
-  ];
-  const strokes = [];
+/** A canvas context that records what is drawn. Text is measured at 6 px a character. */
+function recordingContext() {
+  const drawn = { strokes: [], texts: [], rects: [] };
+  let segment = [];
   let dash = [];
-  let segment;
   const ctx = {
-    save() {}, restore() {}, beginPath() { segment = []; },
+    globalAlpha: 1,
+    save() {}, restore() {}, arc() {}, fill() {}, strokeRect() {},
+    beginPath() { segment = []; },
     setLineDash(d) { dash = d; },
     moveTo(x, y) { segment.push([x, y]); },
     lineTo(x, y) { segment.push([x, y]); },
-    stroke() { strokes.push({ segment, dash, color: ctx.strokeStyle }); },
+    stroke() { drawn.strokes.push({ segment, dash, color: ctx.strokeStyle }); },
+    measureText: (text) => ({ width: text.length * 6 }),
+    fillText(text, x, y) { drawn.texts.push({ text: text.replace(/[\u2066\u2069]/g, ''), x, y, color: ctx.fillStyle }); },
+    fillRect(x, y, width, height) { drawn.rects.push({ x, y, width, height, color: ctx.fillStyle, alpha: ctx.globalAlpha }); },
   };
-  const chart = {
-    ctx,
-    data: { labels: Array(8).fill(''), datasets: config.data.datasets },
-    scales: { intradayX: { getPixelForValue: (v) => 100 * v + 50 }, TempAxis: { getPixelForValue: (v) => 300 - 10 * v } },
-  };
-  const keys = config.data.datasets.map((d) => d.key);
-  // Chart.js sorts datasets by `order`, then index, and draws them from last to first.
-  const drawOrder = config.data.datasets
-    .map((d, i) => ({ key: d.key, order: d.order || 0, i }))
-    .sort((a, b) => a.order - b.order || a.i - b.i)
-    .reverse()
-    .map((d) => d.key);
-  const drawnAfter = (key) => {
-    strokes.length = 0;
-    plugin.afterDatasetDraw(chart, { index: keys.indexOf(key) });
-    return strokes.length;
-  };
-  assert.deepEqual(drawOrder, ['precip', 'fourADay', 'hourly', 'actual'], 'the rain bars are drawn before the line');
-  assert.deepEqual(['fourADay', 'hourly', 'actual'].map(drawnAfter), [0, 0, 0], 'no guides drawn over the line');
-  drawnAfter('precip');
+  return { ctx, drawn };
+}
 
-  assert.deepEqual(strokes.map(({ segment: [[x1, y1], [x2, y2]] }) => { assert.equal(y1, y2, 'horizontal'); return [x1, x2, y1]; }), [
+function fakeChart(config, ctx) {
+  return {
+    ctx,
+    height: 430,
+    chartArea: { left: 0, right: 800, top: 20, bottom: 300 },
+    data: { labels: Array(8).fill(''), datasets: config.data.datasets },
+    scales: {
+      intradayX: { getPixelForValue: (v) => 100 * v + 50, getValueForPixel: (p) => (p - 50) / 100 },
+      TempAxis: { getPixelForValue: (v) => 300 - 10 * v },
+    },
+  };
+}
+
+const guideLine = [
+  { x: -0.4, y: 7.4, part: 'actual' }, { x: 0.2, y: 12.6, part: 'hourly' },
+  { x: 0.7, y: 10.3, part: 'hourly' }, { x: 1.3, y: 4.6, part: 'fourADay' },
+];
+
+test('#2 a dotted guide marks the high and low of each day across its own column, under the line', async (t) => {
+  const { card } = await intradayCard(t, { intraday_entity: 'sensor.owm' }, recordedToday);
+  const config = card.buildChartConfig(chartTheme);
+  const plugin = config.plugins.find((p) => p.id === 'intradayLabels');
+  card._chartData.intraday = guideLine;
+  const { ctx, drawn } = recordingContext();
+  plugin.beforeDatasetsDraw(fakeChart(config, ctx));
+
+  assert.deepEqual(drawn.strokes.map(({ segment: [[x1, y1], [x2, y2]] }) => { assert.equal(y1, y2, 'horizontal'); return [x1, x2, y1]; }), [
     [3, 97, 300 - 126], [3, 97, 300 - 74],
     [103, 197, 300 - 103], [103, 197, 300 - 46],
   ]);
-  assert.ok(strokes.every((s) => s.dash.length > 0 && s.color === chartTheme.textColor), 'dotted, in the theme text colour');
+  assert.ok(drawn.strokes.every((s) => s.dash.length > 0 && s.color === chartTheme.textColor), 'dotted, in the theme text colour');
+});
+
+test('#2 criterion 7: each day\'s numbers sit at the left of its column, pushed clear of the line', async (t) => {
+  const { card } = await intradayCard(t, { intraday_entity: 'sensor.owm', labels_font_size: 11 }, recordedToday);
+  const config = card.buildChartConfig(chartTheme);
+  const plugin = config.plugins.find((p) => p.id === 'intradayLabels');
+  card._chartData.intraday = guideLine;
+  card._chartData.rain = { slots: [], spans: [], peaks: [], hourly: null };
+  const { ctx, drawn } = recordingContext();
+  plugin.afterDatasetsDraw(fakeChart(config, ctx));
+
+  const degrees = drawn.texts.filter((d) => d.text.endsWith('°')).map(({ text, x, y }) => [text, x, y]);
+  assert.deepEqual(degrees, [
+    ['13°', 4, 174 - 4 - 12],
+    ['7°', 4, 226 + 4],
+    // Monday's high guide is at 197, but the line climbs to 12.6 (y 174) across the number.
+    ['10°', 104, 174 - 4 - 12],
+    ['5°', 104, 254 + 4],
+  ]);
+});
+
+test('#2 rain band: chance grows up from the mid line, amount down, and each hourly day\'s peaks get a guide and a number at the left', async (t) => {
+  const { card } = await intradayCard(t, { intraday_entity: 'sensor.owm', precipitation_color: 'blue', temperature1_color: 'orange' }, recordedToday);
+  const config = card.buildChartConfig(chartTheme);
+  const plugin = config.plugins.find((p) => p.id === 'intradayLabels');
+  card._chartData.intraday = guideLine;
+  // The test card shows millimetres; 2.54 mm (0.1 in) fills half the band.
+  card._chartData.rain = {
+    slots: [
+      { column: 0, x0: -0.5, x1: -0.5 + 1 / 24, kind: 'actual', chance: null, amount: 1.27 },
+      { column: 0, x0: 0, x1: 1 / 24, kind: 'hourly', chance: 50, amount: 5 },
+    ],
+    spans: [{ column: 1, x0: 0.5, x1: 1.5, chance: 80, amount: 12.4 }],
+    peaks: [{ column: 0, x0: -0.5, x1: 0.5, chance: 50, amount: 5 }],
+    hourly: { x0: 0, x1: 1 / 24 },
+  };
+  const { ctx, drawn } = recordingContext();
+  plugin.afterDatasetsDraw(fakeChart(config, ctx));
+
+  const mid = 300 + 12 + 40;
+  const bars = drawn.rects.filter((r) => r.width < 5).map(({ y, height, color, alpha }) => [Math.round(y), Math.round(height), color, alpha]);
+  assert.deepEqual(bars, [
+    [mid, 20, 'orange', 1],
+    [mid - 20, 20, 'blue', 0.5],
+    [mid, 40, 'blue', 1],
+  ], 'measured amount in orange, half way; forecast chance half way up; forecast amount capped at the band');
+  const dayBar = drawn.rects.find((r) => r.width > 90 && r.alpha === 0.5);
+  assert.deepEqual([dayBar.y, dayBar.height], [mid - 32, 32], 'a daily-only day shows its chance as one bar across the day');
+  assert.ok(!drawn.rects.some((r) => r.width > 90 && r.alpha === 1 && r.color === 'blue'), 'and no amount bar');
+
+  const texts = drawn.texts.filter((d) => !d.text.endsWith('°')).map(({ text, x }) => [text, x]);
+  assert.deepEqual(texts.filter(([text]) => text.includes('%') || text.includes('mm')), [
+    ['50%', 4], ['5.0 mm', 4],
+    ['80%', 150], ['12 mm', 150],
+  ], 'peak numbers at the left of the column; daily boxes centred in their span');
 });
 
 for (const [criterion, forecast] of [['#2 criterion 8: with no intraday_entity', {}], ['#2 criterion 9: with an intraday_entity that does not exist', { intraday_entity: 'sensor.missing' }]]) {

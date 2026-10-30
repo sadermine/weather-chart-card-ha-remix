@@ -155,7 +155,7 @@ for (const width of [390, 1200]) {
 
 for (const direction of ['ltr', 'rtl']) {
   for (const intraday of [false, true]) {
-    test('rain bars centre on their day columns: ' + direction + ', intraday line ' + (intraday ? 'on' : 'off'), async () => {
+    test((intraday ? 'the rain band replaces the bars and the line centres on its day columns: ' : 'rain bars centre on their day columns: ') + direction, async () => {
       const page = await browser.newPage({ viewport: { width: 440, height: 844 } });
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -203,12 +203,12 @@ for (const direction of ['ltr', 'rtl']) {
           const x = chart.scales.x;
           const columnWidth = Math.abs(x.getPixelForValue(1) - x.getPixelForValue(0));
           return {
-            bars: chart.getDatasetMeta(rain).data.map((bar, k) => ({ offCentre: bar.x - x.getPixelForValue(k), width: bar.width })),
-            expectedWidth: columnWidth * chart.data.datasets[rain].barPercentage,
+            bars: rain < 0 ? [] : chart.getDatasetMeta(rain).data.map((bar, k) => ({ offCentre: bar.x - x.getPixelForValue(k), width: bar.width })),
+            expectedWidth: rain < 0 ? 0 : columnWidth * chart.data.datasets[rain].barPercentage,
             lineOffsets: chart.scales.intradayX ? chart.data.labels.map((_, k) => chart.scales.intradayX.getPixelForValue(k) - x.getPixelForValue(k)) : [],
           };
         });
-        assert.equal(result.bars.length, 6);
+        assert.equal(result.bars.length, intraday ? 0 : 6);
         for (const bar of result.bars) {
           assert.ok(Math.abs(bar.offCentre) < 1, 'bar centred on its column: ' + JSON.stringify(bar));
           assert.ok(Math.abs(bar.width - result.expectedWidth) < 1, 'bar keeps its full width: ' + JSON.stringify(bar));
