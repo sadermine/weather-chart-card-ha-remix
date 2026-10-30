@@ -7,6 +7,7 @@ import {
   WeatherEntityFeature
 } from './const.js';
 import { DEFAULTS, FORECAST_DEFAULTS, UNITS_DEFAULTS } from './defaults.js';
+import { INTRADAY_PARTS, buildIntradayLine, dayLabels, localDateHour, localMidnight, placeLabels, splitParts } from './intraday.js';
 import {LitElement, html} from 'lit';
 import './weather-chart-card-editor.js';
 import {Chart, registerables} from 'chart.js';
@@ -163,6 +164,17 @@ set hass(hass) {
   }
   this._themeKey = themeKey;
 
+  if (this.intradayActive()) {
+    this.trackIntradayActual(hass);
+    const fourADayState = hass.states[this.config.forecast.intraday_entity];
+    if (fourADayState !== this._fourADayState) {
+      this._fourADayState = fourADayState;
+      if (this.forecastChart) {
+        this.updateChart();
+      }
+    }
+  }
+
   if (this.weather) {
     this.syncForecastSubscriptions();
     // setConfig and connectedCallback can run before hass arrives, when the
@@ -190,21 +202,88 @@ readSensorState(hass, entityId, fallback) {
   return this.hasSensorState(hass, entityId) ? hass.states[entityId].state : fallback;
 }
 
+intradayActive() {
+  return this.config.show_forecast !== false
+    && this.currentForecastType() === 'daily'
+    && this.config.forecast.intraday_line === true;
+}
+
+/**
+ * Today's readings of the weather entity's temperature, in the entity's unit:
+ * its recorded history from local midnight, read once, then each new state.
+ */
+trackIntradayActual(hass) {
+  const entityId = this.config.entity;
+  const weather = this.weather;
+  if (!this._actualTemps || this._actualTemps.entityId !== entityId) {
+    // The state at load is in the history; later states are appended below.
+    this._actualTemps = { entityId, readings: [], lastState: weather };
+    this.loadIntradayHistory(hass, entityId);
+  }
+  if (!weather || weather === this._actualTemps.lastState) {
+    return;
+  }
+  this._actualTemps.lastState = weather;
+  const reading = { time: Date.parse(weather.last_updated), value: weather.attributes.temperature };
+  const readings = this._actualTemps.readings;
+  const last = readings[readings.length - 1];
+  if (Number.isFinite(reading.time) && Number.isFinite(reading.value) && (!last || reading.time > last.time)) {
+    const midnight = localMidnight(Date.now(), this.getTimezone());
+    this._actualTemps.readings = [...readings.filter((r) => r.time >= midnight), reading];
+  }
+}
+
+async loadIntradayHistory(hass, entityId) {
+  let history;
+  try {
+    const result = await hass.callWS({
+      type: 'history/history_during_period',
+      start_time: new Date(localMidnight(Date.now(), this.getTimezone())).toISOString(),
+      entity_ids: [entityId],
+      include_start_time_state: true,
+      // Temperature changes of a weather entity are attribute-only changes,
+      // which the recorder treats as insignificant.
+      significant_changes_only: false,
+      minimal_response: false,
+      no_attributes: false,
+    });
+    history = (result && result[entityId]) || [];
+  } catch (error) {
+    console.warn(`weather-chart-card-ha: cannot read the history of ${entityId}; the intraday line starts at now.`, error);
+    return;
+  }
+  if (!this._actualTemps || this._actualTemps.entityId !== entityId) {
+    return;
+  }
+  const recorded = history
+    .map((state) => ({ time: state.lu * 1000, value: state.a && state.a.temperature }))
+    .filter((r) => Number.isFinite(r.time) && Number.isFinite(r.value));
+  const lastRecorded = recorded.length ? recorded[recorded.length - 1].time : -Infinity;
+  this._actualTemps.readings = [...recorded, ...this._actualTemps.readings.filter((r) => r.time > lastRecorded)];
+  if (this.forecastChart) {
+    this.updateChart();
+  }
+}
+
 currentForecastType() {
   return (this.config && this.config.forecast && this.config.forecast.type) || 'daily';
 }
 
 /**
  * Forecast types that need a live subscription: the one on screen, plus the
- * other one while auto-rotate is on. Keeping both open during rotation makes
+ * other one while auto-rotate is on, or the hourly one that the daily chart's
+ * intraday line reads. Keeping both open during rotation makes
  * each switch instant and avoids a websocket re-subscribe every few seconds.
  */
 neededForecastTypes() {
   const current = this.currentForecastType();
-  if (!this._canAutoRotate) {
-    return [current];
+  if (this._canAutoRotate) {
+    return [current, current === 'daily' ? 'hourly' : 'daily'];
   }
-  return [current, current === 'daily' ? 'hourly' : 'daily'];
+  if (this.intradayActive() && this.forecastEntitySupports('hourly')) {
+    return [current, 'hourly'];
+  }
+  return [current];
 }
 
 /**
@@ -279,6 +358,9 @@ subscribeForecastType(type) {
     subscription.signature = signature;
     this._forecastCache[type] = forecast;
     if (type !== this.currentForecastType()) {
+      if (type === 'hourly' && this.intradayActive() && this.forecastChart) {
+        this.updateChart();
+      }
       return;
     }
     this.forecasts = forecast;
@@ -1485,9 +1567,7 @@ createTemperatureGradient(data, unit, ctx, chartArea, rangeC = null) {
   return gradient;
 }
 
-drawChart({ config, language, weather, forecastItems } = this) {
-  const self = this; // Capture component instance for use in Chart.js callbacks
-
+drawChart({ config } = this) {
   // No canvas is rendered when the forecast is hidden, so bail out before the
   // lookup below reports a missing element.
   if (config.show_forecast === false) {
@@ -1511,6 +1591,32 @@ drawChart({ config, language, weather, forecastItems } = this) {
   if (this.forecastChart) {
     this.forecastChart.destroy();
   }
+
+  // Read theme variables from the card itself, so view- and card-level themes
+  // (and card-mod) apply, not only the page theme set on <body>.
+  const style = getComputedStyle(this);
+
+  Chart.defaults.elements.line.fill = false;
+  Chart.defaults.elements.line.tension = 0.3;
+  Chart.defaults.elements.line.borderWidth = 1.5;
+  Chart.defaults.elements.point.radius = 2;
+  Chart.defaults.elements.point.hitRadius = 10;
+
+  this.forecastChart = new Chart(chartCanvas.getContext('2d'), this.buildChartConfig({
+    backgroundColor: style.getPropertyValue('--card-background-color'),
+    textColor: style.getPropertyValue('--primary-text-color'),
+    dividerColor: style.getPropertyValue('--divider-color'),
+    rtl: document.dir === 'rtl',
+  }));
+}
+
+/**
+ * The forecast chart's Chart.js configuration. The theme colours and the text
+ * direction are passed in, so it builds without a document.
+ */
+buildChartConfig({ backgroundColor, textColor, dividerColor, rtl }) {
+  const self = this; // Capture component instance for use in Chart.js callbacks
+  const config = this.config;
   var tempUnit = this.unitTemperature || this._hass.config.unit_system.temperature;
   const displayPrecipUnit = this.getDisplayPrecipitationUnit();
   const precipUnit = config.forecast.precipitation_type === 'probability'
@@ -1527,32 +1633,13 @@ drawChart({ config, language, weather, forecastItems } = this) {
   this._chartData = data;
   const tempColorRange = this.getTemperatureRangeC(data.tempHigh, tempUnit);
 
-  // Read theme variables from the card itself, so view- and card-level themes
-  // (and card-mod) apply, not only the page theme set on <body>.
-  var style = getComputedStyle(this);
-  var backgroundColor = style.getPropertyValue('--card-background-color');
-  var textColor = style.getPropertyValue('--primary-text-color');
-  var dividerColor = style.getPropertyValue('--divider-color');
-  const canvas = this.renderRoot.querySelector('#forecastChart');
-  if (!canvas) {
-    requestAnimationFrame(() => this.drawChart());
-    return;
-  }
-
-  const ctx = canvas.getContext('2d');
-
   const precipMax = config.forecast.precipitation_type === 'probability'
     ? 100
     : this.getPrecipitationAxisMax(displayPrecipUnit, config.forecast.type === 'hourly');
 
-  Chart.defaults.elements.line.fill = false;
-  Chart.defaults.elements.line.tension = 0.3;
-  Chart.defaults.elements.line.borderWidth = 1.5;
-  Chart.defaults.elements.point.radius = 2;
-  Chart.defaults.elements.point.hitRadius = 10;
-
   var datasets = [
     {
+      key: 'high',
       label: this.ll('tempHi'),
       type: 'line',
       data: data.tempHigh,
@@ -1583,6 +1670,7 @@ drawChart({ config, language, weather, forecastItems } = this) {
       },
     },
     {
+      key: 'low',
       label: this.ll('tempLo'),
       type: 'line',
       data: data.tempLow,
@@ -1592,6 +1680,7 @@ drawChart({ config, language, weather, forecastItems } = this) {
       backgroundColor: config.forecast.temperature2_color,
     },
     {
+      key: 'precip',
       label: this.ll('precip'),
       type: 'bar',
       data: data.precip,
@@ -1689,6 +1778,12 @@ drawChart({ config, language, weather, forecastItems } = this) {
     };
   }
 
+  const plugins = [];
+  if (data.intraday) {
+    datasets = [...this.buildIntradayDatasets(data.intraday), datasets[2]];
+    plugins.push(this.buildIntradayLabelsPlugin());
+  }
+
   // Optional: mark today's column (daily forecasts only) with a soft band and a bold date label.
   // Resolved on every draw: updateChart() reuses this chart instance, so labels and "today" change.
   const todayIndexOf = (labels) => (config.forecast.highlight_today && (config.forecast.type || 'daily') === 'daily'
@@ -1719,9 +1814,9 @@ drawChart({ config, language, weather, forecastItems } = this) {
     },
   };
 
-  this.forecastChart = new Chart(ctx, {
+  return {
     type: 'bar',
-    plugins: [highlightTodayPlugin],
+    plugins: [highlightTodayPlugin, ...plugins],
     data: {
       labels: data.dateTime,
       datasets: datasets,
@@ -1792,13 +1887,23 @@ drawChart({ config, language, weather, forecastItems } = this) {
                   return time;
               },
           },
-          reverse: document.dir === 'rtl' ? true : false,
+          reverse: rtl,
         },
+        ...(data.intraday ? {
+          intradayX: {
+            type: 'linear',
+            display: false,
+            min: -0.5,
+            max: data.dateTime.length - 0.5,
+            // A bar chart gives every x axis the category axis's offset by default.
+            offset: false,
+            reverse: rtl,
+          },
+        } : {}),
         TempAxis: {
           position: 'left',
           beginAtZero: false,
-          suggestedMin: Math.min(...data.tempHigh, ...data.tempLow) - 5,
-          suggestedMax: Math.max(...data.tempHigh, ...data.tempLow) + 3,
+          ...this.getTempAxisRange(data),
           grid: {
             display: false,
             drawTicks: false,
@@ -1844,9 +1949,11 @@ drawChart({ config, language, weather, forecastItems } = this) {
           },
         },
         tooltip: {
-          rtl: document.dir === 'rtl',
-          textDirection: document.dir === 'rtl' ? 'rtl' : 'ltr',
+          rtl,
+          textDirection: rtl ? 'rtl' : 'ltr',
           caretSize: 0,
+          // The intraday line sits on a linear axis, so its label is no date.
+          filter: (item) => !(item.dataset.key in INTRADAY_PARTS),
           caretPadding: 15,
           callbacks: {
             title: function (TooltipItem) {
@@ -1873,9 +1980,9 @@ drawChart({ config, language, weather, forecastItems } = this) {
       var value = context.formattedValue;
       var item = this._chartData.forecast[context.dataIndex];
       var probability = item ? item.precipitation_probability : undefined;
-      var unit = context.datasetIndex === 2 ? precipUnit : tempUnit;
+      var unit = context.dataset.key === 'precip' ? precipUnit : tempUnit;
 
-      if (config.forecast.precipitation_type === 'rainfall' && context.datasetIndex === 2) {
+      if (config.forecast.precipitation_type === 'rainfall' && context.dataset.key === 'precip') {
         const rainfallRaw = context.dataset.data[context.dataIndex];
         const rainfallDisplay = formatPrecipitationValue(rainfallRaw);
         if (Number.isFinite(rainfallDisplay)) {
@@ -1883,7 +1990,7 @@ drawChart({ config, language, weather, forecastItems } = this) {
         }
       }
 
-      if (config.forecast.precipitation_type === 'rainfall' && context.datasetIndex === 2 && config.forecast.show_probability && probability !== undefined && probability !== null) {
+      if (config.forecast.precipitation_type === 'rainfall' && context.dataset.key === 'precip' && config.forecast.show_probability && probability !== undefined && probability !== null) {
         return label + ': ' + this.renderBidiMeasurement(value + ' ' + precipUnit + ' / ' + Math.round(probability) + '%');
       } else {
         return label + ': ' + this.renderBidiMeasurement(value + ' ' + unit);
@@ -1893,7 +2000,97 @@ drawChart({ config, language, weather, forecastItems } = this) {
         },
       },
     },
-  });
+  };
+}
+
+/** Suggested temperature axis bounds, with room for the labels above and below. */
+getTempAxisRange(data) {
+  const values = data.intraday && data.intraday.length
+    ? data.intraday.map((point) => point.y)
+    : [...data.tempHigh, ...data.tempLow];
+  return { suggestedMin: Math.min(...values) - 5, suggestedMax: Math.max(...values) + 3 };
+}
+
+getIntradayColors() {
+  return Object.fromEntries(Object.entries(INTRADAY_PARTS)
+    .map(([part, { colorOption }]) => [part, this.config.forecast[colorOption]]));
+}
+
+buildIntradayDatasets(points) {
+  const colors = this.getIntradayColors();
+  const series = splitParts(points);
+  return Object.entries(INTRADAY_PARTS).map(([part, { borderDash }]) => ({
+    key: part,
+    type: 'line',
+    data: series[part],
+    xAxisID: 'intradayX',
+    yAxisID: 'TempAxis',
+    borderColor: colors[part],
+    backgroundColor: colors[part],
+    borderDash,
+    borderWidth: 2,
+    pointRadius: 0,
+    pointHitRadius: 0,
+    // Monotone interpolation never overshoots a point, so the line stays
+    // between each day's high and low numbers.
+    cubicInterpolationMode: 'monotone',
+    datalabels: { display: false },
+  }));
+}
+
+/**
+ * Draws each day's high and low number at its highest and lowest point on the
+ * intraday line, sliding numbers that collide into their own day's column.
+ */
+buildIntradayLabelsPlugin() {
+  const self = this;
+  const colors = this.getIntradayColors();
+  const fontSize = parseInt(this.config.forecast.labels_font_size) + 1;
+  const offset = 4;
+  return {
+    id: 'intradayLabels',
+    afterDatasetsDraw(chart) {
+      const points = self._chartData && self._chartData.intraday;
+      const xScale = chart.scales.intradayX;
+      const yScale = chart.scales.TempAxis;
+      if (!points || !points.length || !xScale || !yScale) {
+        return;
+      }
+      const columnCount = chart.data.labels.length;
+      const columns = Array.from({ length: columnCount }, (_, column) => {
+        const a = xScale.getPixelForValue(column - 0.5);
+        const b = xScale.getPixelForValue(column + 0.5);
+        return { left: Math.min(a, b), right: Math.max(a, b) };
+      });
+      const c = chart.ctx;
+      c.save();
+      c.font = `${fontSize}px ${Chart.defaults.font.family}`;
+      c.textAlign = 'center';
+      c.textBaseline = 'top';
+      const labels = dayLabels(points, columnCount, colors).map((label) => {
+        const px = xScale.getPixelForValue(label.point.x);
+        const py = yScale.getPixelForValue(label.point.y);
+        const text = self.renderBidiMeasurement(label.point.y + '°');
+        return {
+          ...label, px, py, text, value: label.point.y, cx: px,
+          width: c.measureText(text).width,
+          height: fontSize,
+          top: label.kind === 'high' ? py - offset - fontSize : py + offset,
+        };
+      });
+      for (const label of placeLabels(labels, columns, chart.chartArea)) {
+        if (!label.visible) {
+          continue;
+        }
+        c.fillStyle = label.color;
+        c.beginPath();
+        c.arc(label.px, label.py, 2.5, 0, 2 * Math.PI);
+        c.fill();
+        c.fillText(label.text, label.cx, label.top);
+      }
+      c.restore();
+    },
+  };
 }
 
 /**
@@ -1979,13 +2176,59 @@ computeForecastData({ config, forecastItems } = this) {
     }
   }
 
-  return {
+  const data = {
     forecast,
     dateTime,
     tempHigh,
     tempLow,
     precip,
+  };
+  if (this.intradayActive()) {
+    data.intraday = this.computeIntradayLine(dateTime);
   }
+  return data;
+}
+
+/**
+ * Points of the daily chart's intraday line, in the display unit: today's
+ * readings of the weather entity, its hourly forecast, then the four-a-day
+ * entity's One Call daily entries.
+ */
+computeIntradayLine(dateTime) {
+  const roundTemp = this.config.forecast.round_temp == true;
+  const toDisplay = (value, unit) => {
+    const converted = this.convertTemperature(value, unit, this.unitTemperature);
+    return roundTemp ? Math.round(converted) : Math.round(converted * 10) / 10;
+  };
+  const timeZone = this.getTimezone();
+  const now = Date.now();
+  const weatherAttributes = (this.weather && this.weather.attributes) || {};
+  const actualUnit = weatherAttributes.temperature_unit;
+  const hourlyUnit = this.getForecastEntityAttributes('hourly').temperature_unit || actualUnit;
+
+  const current = { time: now, value: weatherAttributes.temperature };
+  const actual = [...((this._actualTemps && this._actualTemps.readings) || []), current]
+    .filter((r) => Number.isFinite(r.value))
+    .map((r) => ({ time: r.time, value: toDisplay(r.value, actualUnit) }));
+
+  const hourly = ((this._forecastCache && this._forecastCache.hourly) || [])
+    .map((item) => ({ time: Date.parse(item.datetime), value: item.temperature }))
+    .filter((r) => Number.isFinite(r.time) && Number.isFinite(r.value))
+    .map((r) => ({ time: r.time, value: toDisplay(r.value, hourlyUnit) }));
+
+  // One Call temperatures carry no unit; they are taken to be in the hourly forecast's.
+  const fourADayState = this._hass && this._hass.states[this.config.forecast.intraday_entity];
+  const entries = fourADayState && Array.isArray(fourADayState.attributes.daily) ? fourADayState.attributes.daily : [];
+  const daily = entries
+    .filter((entry) => entry && Number.isFinite(entry.dt) && entry.temp && typeof entry.temp === 'object')
+    .map((entry) => ({
+      dt: entry.dt,
+      temp: Object.fromEntries(Object.entries(entry.temp)
+        .map(([key, value]) => [key, Number.isFinite(value) ? toDisplay(value, hourlyUnit) : NaN])),
+    }));
+
+  const columns = dateTime.map((datetime) => localDateHour(Date.parse(datetime), timeZone).date);
+  return buildIntradayLine({ columns, actual, hourly, daily, now, timeZone });
 }
 
 updateChart({ forecasts, forecastChart } = this) {
@@ -1997,10 +2240,21 @@ updateChart({ forecasts, forecastChart } = this) {
   this._chartData = data;
 
   if (forecastChart) {
+    const series = {
+      high: data.tempHigh,
+      low: data.tempLow,
+      precip: data.precip,
+      ...(data.intraday ? splitParts(data.intraday) : {}),
+    };
     forecastChart.data.labels = data.dateTime;
-    forecastChart.data.datasets[0].data = data.tempHigh;
-    forecastChart.data.datasets[1].data = data.tempLow;
-    forecastChart.data.datasets[2].data = data.precip;
+    for (const dataset of forecastChart.data.datasets) {
+      dataset.data = series[dataset.key];
+    }
+    const scales = forecastChart.options.scales;
+    if (scales.intradayX) {
+      scales.intradayX.max = data.dateTime.length - 0.5;
+      Object.assign(scales.TempAxis, this.getTempAxisRange(data));
+    }
     forecastChart.update();
   }
 }
