@@ -2043,7 +2043,8 @@ buildIntradayDatasets(points) {
 /**
  * Draws each day's high and low number at its highest and lowest point on the
  * intraday line, sliding numbers that collide into their own day's column.
- * Under the line, a dotted guide marks each day's high and low across its column.
+ * A dotted guide marks each day's high and low across its column, over the rain
+ * bars and under the line.
  */
 buildIntradayLabelsPlugin(guideColor) {
   const self = this;
@@ -2068,8 +2069,9 @@ buildIntradayLabelsPlugin(guideColor) {
   };
   return {
     id: 'intradayLabels',
-    beforeDatasetsDraw(chart) {
-      const view = layout(chart);
+    // Chart.js draws the last dataset first, so the rain bars are already down and the line is not.
+    afterDatasetDraw(chart, { index }) {
+      const view = chart.data.datasets[index].key === 'precip' && layout(chart);
       if (!view) {
         return;
       }

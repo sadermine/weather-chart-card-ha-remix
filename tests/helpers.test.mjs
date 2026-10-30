@@ -473,9 +473,14 @@ test('#2 criterion 5: with intraday_line the high and low lines give way to the 
   assert.deepEqual(lines.map((d) => [d.borderColor, d.borderDash.length > 0]), [['orange', false], ['blue', false], ['blue', true]]);
 });
 
-test('#2 a dotted guide marks the high and low of each day across its own column, under the line', async (t) => {
-  const { card, line } = await intradayCard(t, { intraday_entity: 'sensor.owm' }, recordedToday);
-  const plugin = card.buildChartConfig(chartTheme).plugins.find((p) => p.id === 'intradayLabels');
+test('#2 a dotted guide marks the high and low of each day across its own column, over the rain bars and under the line', async (t) => {
+  const { card } = await intradayCard(t, { intraday_entity: 'sensor.owm' }, recordedToday);
+  const config = card.buildChartConfig(chartTheme);
+  const plugin = config.plugins.find((p) => p.id === 'intradayLabels');
+  card._chartData.intraday = [
+    { x: -0.4, y: 7.4, part: 'actual' }, { x: 0.2, y: 12.6, part: 'hourly' },
+    { x: 0.7, y: 10.3, part: 'hourly' }, { x: 1.3, y: 4.6, part: 'fourADay' },
+  ];
   const strokes = [];
   let dash = [];
   let segment;
@@ -488,14 +493,24 @@ test('#2 a dotted guide marks the high and low of each day across its own column
   };
   const chart = {
     ctx,
-    data: { labels: Array(8).fill('') },
+    data: { labels: Array(8).fill(''), datasets: config.data.datasets },
     scales: { intradayX: { getPixelForValue: (v) => 100 * v + 50 }, TempAxis: { getPixelForValue: (v) => 300 - 10 * v } },
   };
-  plugin.beforeDatasetsDraw(chart);
+  const keys = config.data.datasets.map((d) => d.key);
+  // Chart.js draws datasets from last to first.
+  const drawnAfter = (key) => {
+    strokes.length = 0;
+    plugin.afterDatasetDraw(chart, { index: keys.indexOf(key) });
+    return strokes.length;
+  };
+  assert.equal(keys.at(-1), 'precip', 'the rain bars are drawn before the line');
+  assert.deepEqual(['fourADay', 'hourly', 'actual'].map(drawnAfter), [0, 0, 0], 'no guides drawn over the line');
+  drawnAfter('precip');
 
-  const expected = dayLabels(line, 8, {}).map(({ column, point }) => [100 * column + 3, 100 * column + 97, 300 - 10 * point.y]);
-  assert.ok(expected.length >= 8, 'a high and a low for several days');
-  assert.deepEqual(strokes.map(({ segment: [[x1, y1], [x2, y2]] }) => { assert.equal(y1, y2, 'horizontal'); return [x1, x2, y1]; }), expected);
+  assert.deepEqual(strokes.map(({ segment: [[x1, y1], [x2, y2]] }) => { assert.equal(y1, y2, 'horizontal'); return [x1, x2, y1]; }), [
+    [3, 97, 300 - 126], [3, 97, 300 - 74],
+    [103, 197, 300 - 103], [103, 197, 300 - 46],
+  ]);
   assert.ok(strokes.every((s) => s.dash.length > 0 && s.color === chartTheme.textColor), 'dotted, in the theme text colour');
 });
 
