@@ -618,11 +618,15 @@ test('#2 rain band: chance grows up from the mid line, amount down, and each hou
       { column: 0, x0: -0.5, x1: -0.5 + 1 / 24, kind: 'actual', chance: null, amount: 1.27 },
       { column: 0, x0: 0, x1: 1 / 24, kind: 'hourly', chance: 50, amount: 5 },
     ],
-    spans: [{ column: 1, x0: 0.5, x1: 1.5, chance: 80, amount: 12.4 }],
+    spans: [
+      { column: 2, x0: 1.5 + 1 / 24, x1: 2.5, chance: 80, amount: 12.4 },
+    ],
     peaks: [
       { column: 0, x0: -0.5, x1: 0.5, chance: 50, amount: 5 },
-      // One forecast hour is narrower than its numbers.
-      { column: 1, x0: 0.5, x1: 0.5 + 1 / 24, chance: 10, amount: 0.2 },
+      // Late in the day, today's hours are narrower than the numbers, but nothing else is in the way.
+      { column: 1, x0: 1.5 - 2 / 24, x1: 1.5, chance: 20, amount: 0.3 },
+      // One forecast hour before the daily bar has no room for them.
+      { column: 2, x0: 1.5, x1: 1.5 + 1 / 24, chance: 10, amount: 0.2 },
     ],
     hourly: { x0: 0, x1: 1 / 24 },
   };
@@ -640,11 +644,12 @@ test('#2 rain band: chance grows up from the mid line, amount down, and each hou
   assert.deepEqual([dayBar.y, dayBar.height], [mid - 32, 32], 'a daily-only day shows its chance as one bar across the day');
   assert.ok(!drawn.rects.some((r) => r.width > 90 && r.alpha === 1 && r.color === 'blue'), 'and no amount bar');
 
-  const texts = drawn.texts.filter((d) => !d.text.endsWith('°')).map(({ text, x }) => [text, x]);
+  const texts = drawn.texts.filter((d) => !d.text.endsWith('°')).map(({ text, x }) => [text, Math.round(x)]);
   assert.deepEqual(texts.filter(([text]) => text.includes('%') || text.includes('mm')), [
     ['50%', 4], ['5.0 mm', 4],
-    ['80%', 150], ['12 mm', 150],
-  ], 'peak numbers at the left of the column, none where the hours are narrower than the number; daily boxes centred in their span');
+    ['20%', 104], ['0.3 mm', 104],
+    ['80%', 252], ['12 mm', 252],
+  ], 'peak numbers at the left of the column, none where the daily bar leaves no room; daily boxes centred in their span');
 });
 
 for (const [criterion, forecast] of [['#2 criterion 8: with no intraday_entity', {}], ['#2 criterion 9: with an intraday_entity that does not exist', { intraday_entity: 'sensor.missing' }]]) {

@@ -2261,10 +2261,12 @@ buildIntradayPlugin({ backgroundColor, textColor, dividerColor, chartTextColor, 
     for (const peak of rain.peaks) {
       const { left, right } = view.span(peak.x0, peak.x1);
       const column = view.columns[peak.column];
-      // A day whose hours are narrower than its number would have the number on its daily bar.
+      // The number needs room between the day's start and its daily bar, if it has one.
+      const daySpan = rain.spans.find((span) => span.column === peak.column);
+      const room = view.span(peak.column - 0.5, daySpan ? daySpan.x0 : peak.column + 0.5);
       const fits = (text) => {
         c.font = font(fontSize, true);
-        return right - left >= numberInset + c.measureText(self.renderBidiMeasurement(text)).width;
+        return room.right - room.left >= numberInset + c.measureText(self.renderBidiMeasurement(text)).width;
       };
       const chance = `${Math.round(peak.chance)}%`;
       if (peak.chance > 0 && fits(chance)) {
