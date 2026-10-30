@@ -300,7 +300,10 @@ trackIntradayRain(hass) {
   const readings = this._actualRain.readings;
   const last = readings[readings.length - 1];
   if (Number.isFinite(reading.time) && (!last || reading.time > last.time)) {
-    this._actualRain.readings = [...readings, reading];
+    // The last reading before midnight carries the rate or total into today.
+    const midnight = localMidnight(Date.now(), this.getTimezone());
+    const today = readings.findIndex((r) => r.time >= midnight);
+    this._actualRain.readings = [...readings.slice(today === -1 ? -1 : Math.max(0, today - 1)), reading];
     if (this.forecastChart) {
       this.updateChart();
     }
@@ -1746,8 +1749,6 @@ buildChartConfig({ backgroundColor, textColor, dividerColor, rtl }) {
       backgroundColor: config.forecast.precipitation_color,
       barPercentage: config.forecast.precip_bar_size / 100,
       categoryPercentage: 1.0,
-      // Chart.js gives each x axis in use its own bar slot, so the intraday line's axis would halve the bars.
-      grouped: false,
       datalabels: {
         display: function (context) {
           // Hides the value printed on each bar; the bars themselves stay.

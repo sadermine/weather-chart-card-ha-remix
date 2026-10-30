@@ -191,7 +191,8 @@ export function hourlyRainfall(readings, { now, isRate, timeZone }) {
   const hours = new Map();
   const add = (time, amount) => {
     const { hour } = localDateHour(time, timeZone);
-    const start = Math.round((time - (hour % 1) * HOUR_MS) / 1000) * 1000;
+    // Recorder timestamps carry milliseconds, which the local hour leaves out.
+    const start = Math.floor(time / 1000) * 1000 - Math.round((hour % 1) * 3600) * 1000;
     hours.set(start, (hours.get(start) || 0) + amount);
   };
   const known = isRate ? readings : readings.filter((r) => Number.isFinite(r.value));
