@@ -2221,7 +2221,9 @@ buildIntradayPlugin({ backgroundColor, textColor, dividerColor, chartTextColor, 
     c.strokeStyle = dividerColor;
     c.lineWidth = 1;
     // Day dividers carry on from the chart's grid down through the band.
-    view.columns.slice(1).forEach(({ left }) => vertical(left, area.bottom));
+    for (let column = 1; column < view.columns.length; column++) {
+      vertical(view.xScale.getPixelForValue(column - 0.5), area.bottom);
+    }
     if (rain.hourly) {
       c.setLineDash([2, 2]);
       vertical(view.xScale.getPixelForValue(rain.hourly.x0));

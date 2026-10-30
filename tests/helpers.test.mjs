@@ -651,8 +651,15 @@ test('#2 rain band: chance grows up from the mid line, amount down, and each hou
     [mid, 'rgba(128, 128, 128, 0.2)', 1],
     [300, chartTheme.textColor, 1.5],
   ], 'a faint mid line, and a stronger line between the chart and the band');
-  const dividers = drawn.strokes.filter(({ segment: [a, b], dash }) => a[0] === b[0] && !dash.length).map(({ segment }) => [segment[0][0], segment[0][1], segment[1][1]]);
-  assert.deepEqual(dividers.slice(0, 2), [[100, 300, mid + 40], [200, 300, mid + 40]], 'day dividers run from the chart down through the band');
+  const dividers = (strokes) => strokes.filter(({ segment: [a, b], dash }) => a[0] === b[0] && !dash.length)
+    .map(({ segment }) => [segment[0][0], segment[0][1], segment[1][1]]).sort((a, b) => a[0] - b[0]);
+  const between = [100, 200, 300, 400, 500, 600, 700].map((x) => [x, 300, mid + 40]);
+  assert.deepEqual(dividers(drawn.strokes), between, 'day dividers run from the chart down through the band');
+  const rtl = recordingContext();
+  const reversed = fakeChart(config, rtl.ctx);
+  reversed.scales.intradayX = { getPixelForValue: (v) => 750 - 100 * v, getValueForPixel: (p) => (750 - p) / 100 };
+  plugin.afterDatasetsDraw(reversed);
+  assert.deepEqual(dividers(rtl.drawn.strokes), between, 'and fall between the same days right to left');
 
   const texts = drawn.texts.filter((d) => !d.text.endsWith('°')).map(({ text, x }) => [text, Math.round(x)]);
   assert.deepEqual(texts.filter(([text]) => text.includes('%') || text.includes('mm')), [
