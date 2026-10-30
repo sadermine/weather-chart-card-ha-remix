@@ -1783,7 +1783,7 @@ buildChartConfig({ backgroundColor, textColor, dividerColor, rtl }) {
   const plugins = [];
   if (data.intraday) {
     datasets = [...this.buildIntradayDatasets(data.intraday), datasets[2]];
-    plugins.push(this.buildIntradayLabelsPlugin());
+    plugins.push(this.buildIntradayLabelsPlugin(textColor));
   }
 
   // Optional: mark today's column (daily forecasts only) with a soft band and a bold date label.
@@ -2043,33 +2043,65 @@ buildIntradayDatasets(points) {
 /**
  * Draws each day's high and low number at its highest and lowest point on the
  * intraday line, sliding numbers that collide into their own day's column.
+ * Under the line, a dotted guide marks each day's high and low across its column.
  */
-buildIntradayLabelsPlugin() {
+buildIntradayLabelsPlugin(guideColor) {
   const self = this;
   const colors = this.getIntradayColors();
   const fontSize = parseInt(this.config.forecast.labels_font_size) + 1;
   const offset = 4;
+  const guideInset = 3;
+  const layout = (chart) => {
+    const points = self._chartData && self._chartData.intraday;
+    const xScale = chart.scales.intradayX;
+    const yScale = chart.scales.TempAxis;
+    if (!points || !points.length || !xScale || !yScale) {
+      return null;
+    }
+    const columnCount = chart.data.labels.length;
+    const columns = Array.from({ length: columnCount }, (_, column) => {
+      const a = xScale.getPixelForValue(column - 0.5);
+      const b = xScale.getPixelForValue(column + 0.5);
+      return { left: Math.min(a, b), right: Math.max(a, b) };
+    });
+    return { columns, xScale, yScale, labels: dayLabels(points, columnCount, colors) };
+  };
   return {
     id: 'intradayLabels',
-    afterDatasetsDraw(chart) {
-      const points = self._chartData && self._chartData.intraday;
-      const xScale = chart.scales.intradayX;
-      const yScale = chart.scales.TempAxis;
-      if (!points || !points.length || !xScale || !yScale) {
+    beforeDatasetsDraw(chart) {
+      const view = layout(chart);
+      if (!view) {
         return;
       }
-      const columnCount = chart.data.labels.length;
-      const columns = Array.from({ length: columnCount }, (_, column) => {
-        const a = xScale.getPixelForValue(column - 0.5);
-        const b = xScale.getPixelForValue(column + 0.5);
-        return { left: Math.min(a, b), right: Math.max(a, b) };
-      });
+      const c = chart.ctx;
+      c.save();
+      c.strokeStyle = guideColor;
+      c.globalAlpha = 0.45;
+      c.lineWidth = 1.2;
+      c.lineCap = 'round';
+      c.setLineDash([1.5, 3.5]);
+      for (const label of view.labels) {
+        const { left, right } = view.columns[label.column];
+        const y = view.yScale.getPixelForValue(label.point.y);
+        c.beginPath();
+        c.moveTo(left + guideInset, y);
+        c.lineTo(right - guideInset, y);
+        c.stroke();
+      }
+      c.restore();
+    },
+    afterDatasetsDraw(chart) {
+      const view = layout(chart);
+      if (!view) {
+        return;
+      }
+      const { columns, xScale, yScale } = view;
       const c = chart.ctx;
       c.save();
       c.font = `${fontSize}px ${Chart.defaults.font.family}`;
       c.textAlign = 'center';
       c.textBaseline = 'top';
-      const labels = dayLabels(points, columnCount, colors).map((label) => {
+      const labels = view.labels.map((label) => {
         const px = xScale.getPixelForValue(label.point.x);
         const py = yScale.getPixelForValue(label.point.y);
         const text = self.renderBidiMeasurement(label.value + '°');

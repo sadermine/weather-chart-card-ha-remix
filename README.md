@@ -442,7 +442,8 @@ The line has three parts:
 - **Hourly forecast**: the weather entity's hourly forecast, in `temperature2_color`.
 - **Four a day**: after the hourly forecast ends, the `temp.morn`, `temp.day`, `temp.eve` and `temp.night` values of each `intraday_entity` entry, drawn at 6 AM, noon, 6 PM and 11 PM local time. Dashed, in `temperature2_color`. Each entry's `temp.min` and `temp.max` add an estimated point, so the line reaches the day's low and high. These temperatures must be in the hourly forecast's unit. Without `intraday_entity`, the line ends where the hourly forecast ends.
 
-Each day shows two numbers: its highest and lowest point on the line, in the colour of that part of the line.
+Each day shows two numbers: its highest and lowest point on the line, in whole degrees and in the colour of that part of the line.
+A faint dotted line runs across each day's column at its high and at its low.
 When two days' numbers overlap, each moves into its own day's column. If they still overlap, only the lower low (or the higher high) stays.
 The hourly view does not change.
 

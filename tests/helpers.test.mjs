@@ -473,6 +473,32 @@ test('#2 criterion 5: with intraday_line the high and low lines give way to the 
   assert.deepEqual(lines.map((d) => [d.borderColor, d.borderDash.length > 0]), [['orange', false], ['blue', false], ['blue', true]]);
 });
 
+test('#2 a dotted guide marks the high and low of each day across its own column, under the line', async (t) => {
+  const { card, line } = await intradayCard(t, { intraday_entity: 'sensor.owm' }, recordedToday);
+  const plugin = card.buildChartConfig(chartTheme).plugins.find((p) => p.id === 'intradayLabels');
+  const strokes = [];
+  let dash = [];
+  let segment;
+  const ctx = {
+    save() {}, restore() {}, beginPath() { segment = []; },
+    setLineDash(d) { dash = d; },
+    moveTo(x, y) { segment.push([x, y]); },
+    lineTo(x, y) { segment.push([x, y]); },
+    stroke() { strokes.push({ segment, dash, color: ctx.strokeStyle }); },
+  };
+  const chart = {
+    ctx,
+    data: { labels: Array(8).fill('') },
+    scales: { intradayX: { getPixelForValue: (v) => 100 * v + 50 }, TempAxis: { getPixelForValue: (v) => 300 - 10 * v } },
+  };
+  plugin.beforeDatasetsDraw(chart);
+
+  const expected = dayLabels(line, 8, {}).map(({ column, point }) => [100 * column + 3, 100 * column + 97, 300 - 10 * point.y]);
+  assert.ok(expected.length >= 8, 'a high and a low for several days');
+  assert.deepEqual(strokes.map(({ segment: [[x1, y1], [x2, y2]] }) => { assert.equal(y1, y2, 'horizontal'); return [x1, x2, y1]; }), expected);
+  assert.ok(strokes.every((s) => s.dash.length > 0 && s.color === chartTheme.textColor), 'dotted, in the theme text colour');
+});
+
 for (const [criterion, forecast] of [['#2 criterion 8: with no intraday_entity', {}], ['#2 criterion 9: with an intraday_entity that does not exist', { intraday_entity: 'sensor.missing' }]]) {
   test(`${criterion}, the line covers today until now and the 48 hourly hours`, async (t) => {
     const { card, line, errors, parts } = await intradayCard(t, forecast, recordedToday);
