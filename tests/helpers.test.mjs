@@ -415,21 +415,27 @@ test('#2 criterion 7: a number sits above or below its guide, and moves further 
 
 test('#2 measured rain: a rate is integrated per local hour until now, and a total counts its rises', () => {
   const at = (h, m = 0, ms = 0) => Date.UTC(2026, 2, 10, h, m, 0, ms);
-  // 0.12 in/h from 05:30 to 06:15, then dry; Kathmandu is UTC+5:45. Recorder times carry milliseconds.
-  const rate = [{ time: at(0), value: 0 }, { time: at(5, 30, 600), value: 0.12 }, { time: at(6, 15, 600), value: 0 }];
+  // 0.12 in/h from 05:30 to 06:15, then dry; Kathmandu is UTC+5:45.
+  const rate = [{ time: at(0), value: 0 }, { time: at(5, 30), value: 0.12 }, { time: at(6, 15), value: 0 }];
   const utc = hourlyRainfall(rate, { now: at(7), isRate: true, timeZone: 'UTC' });
   assert.deepEqual(utc.map((h) => h.time), [0, 1, 2, 3, 4, 5, 6].map((h) => at(h)), 'every hour since the first reading, dry ones included');
-  near(utc[5].amount, 0.12 * 1799.4 / 3600, '05:30:00.6 to 06:00');
-  near(utc[6].amount, 0.12 * 900.6 / 3600, '06:00 to 06:15:00.6');
+  near(utc[5].amount, 0.06, '05:30 to 06:00');
+  near(utc[6].amount, 0.03, '06:00 to 06:15');
   const kathmandu = hourlyRainfall(rate, { now: at(7), isRate: true, timeZone: 'Asia/Kathmandu' });
   assert.ok(kathmandu.every((h) => new Date(h.time).getUTCMinutes() === 15), 'hours start at :15 UTC there');
-  near(kathmandu.find((h) => h.time === at(5, 15)).amount, 0.12 * 2699.4 / 3600, '05:30:00.6 to 06:15 is one Kathmandu hour');
+  near(kathmandu.find((h) => h.time === at(5, 15)).amount, 0.09, '05:30 to 06:15 is one Kathmandu hour');
 
-  const total = [{ time: at(0), value: 0.5 }, { time: at(1, 10, 700), value: 0.6 }, { time: at(1, 50, 200), value: 0.7 }, { time: at(2, 5), value: 0.1 }, { time: at(3), value: NaN }];
+  const total = [{ time: at(0), value: 0.5 }, { time: at(1, 10), value: 0.6 }, { time: at(1, 50), value: 0.7 }, { time: at(2, 5), value: 0.1 }, { time: at(3), value: NaN }];
   const totals = hourlyRainfall(total, { now: at(4), isRate: false, timeZone: 'UTC' });
   assert.deepEqual(totals.map((h) => h.time), [at(1), at(2)]);
   near(totals[0].amount, 0.2, 'two rises in one hour');
   near(totals[1].amount, 0.1, 'a reset counts the new value');
+
+  // Recorder timestamps carry milliseconds; each hour still gets one entry.
+  const recorded = total.map((r, i) => ({ ...r, time: r.time + [0, 700, 200, 900, 0][i] }));
+  const recordedTotals = hourlyRainfall(recorded, { now: at(4), isRate: false, timeZone: 'UTC' });
+  assert.deepEqual(recordedTotals.map((h) => h.time), [at(1), at(2)], 'one entry per hour');
+  near(recordedTotals[0].amount, 0.2, 'two rises in one hour, with milliseconds');
 });
 
 test('#2 rain band: measured hours until the current hour, forecast hours from it, then each day\'s forecast for the hours left', () => {
