@@ -521,6 +521,7 @@ test('#2 criterion 4: without intraday_line the chart keeps its high, low and pr
   const chart = card.buildChartConfig(chartTheme);
   assert.deepEqual(chart.data.datasets.map((d) => [d.label, d.type]), [[card.ll('tempHi'), 'line'], [card.ll('tempLo'), 'line'], [card.ll('precip'), 'bar']]);
   assert.deepEqual(Object.keys(chart.options.scales), ['x', 'TempAxis', 'PrecipAxis']);
+  assert.equal(chart.options.scales.PrecipAxis.grid.display, true, 'the zero line under the chart still draws');
 });
 
 test('#2 criterion 5: with intraday_line the high and low lines give way to the three parts of one line, and the rain bars to the band', async (t) => {
