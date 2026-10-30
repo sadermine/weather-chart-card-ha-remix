@@ -497,13 +497,18 @@ test('#2 a dotted guide marks the high and low of each day across its own column
     scales: { intradayX: { getPixelForValue: (v) => 100 * v + 50 }, TempAxis: { getPixelForValue: (v) => 300 - 10 * v } },
   };
   const keys = config.data.datasets.map((d) => d.key);
-  // Chart.js draws datasets from last to first.
+  // Chart.js sorts datasets by `order`, then index, and draws them from last to first.
+  const drawOrder = config.data.datasets
+    .map((d, i) => ({ key: d.key, order: d.order || 0, i }))
+    .sort((a, b) => a.order - b.order || a.i - b.i)
+    .reverse()
+    .map((d) => d.key);
   const drawnAfter = (key) => {
     strokes.length = 0;
     plugin.afterDatasetDraw(chart, { index: keys.indexOf(key) });
     return strokes.length;
   };
-  assert.equal(keys.at(-1), 'precip', 'the rain bars are drawn before the line');
+  assert.deepEqual(drawOrder, ['precip', 'fourADay', 'hourly', 'actual'], 'the rain bars are drawn before the line');
   assert.deepEqual(['fourADay', 'hourly', 'actual'].map(drawnAfter), [0, 0, 0], 'no guides drawn over the line');
   drawnAfter('precip');
 

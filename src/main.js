@@ -2069,7 +2069,7 @@ buildIntradayLabelsPlugin(guideColor) {
   };
   return {
     id: 'intradayLabels',
-    // Chart.js draws the last dataset first, so the rain bars are already down and the line is not.
+    // With no dataset setting `order`, Chart.js draws the last dataset first, so the rain bars are already down and the line is not.
     afterDatasetDraw(chart, { index }) {
       const view = chart.data.datasets[index].key === 'precip' && layout(chart);
       if (!view) {
