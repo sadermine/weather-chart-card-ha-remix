@@ -214,6 +214,9 @@ units:
 | extra_rows                     | list    | none                     | Extra rows of per-day values under the forecast, read from a list attribute of any entity (daily forecast only). See [Extra Rows](#extra-rows-per-day-values-from-a-sensor). |
 | highlight_today                | boolean | false                    | Highlight today's column in the daily forecast (soft background band, bold date label).            |
 | highlight_today_color          | string  | rgba(127,127,127,0.12)   | Colour of the today band.                                                                          |
+| intraday_line                  | boolean | false                    | Daily forecast only: replace the high and low lines with one line that follows the temperature through each day. YAML only. See [Intraday Line](#intraday-line). |
+| intraday_entity                | string  | none                     | Entity whose `daily` attribute holds OpenWeatherMap One Call 3.0 daily entries, for the four-a-day part of the intraday line. YAML only. |
+| intraday_rain_entity           | string  | none                     | Sensor for the rain that fell today, shown hour by hour under the intraday line: a rate (`in/h`, `mm/h`) or a running total (`in`, `mm`). YAML only. |
 
 ### Units of Measurement
 
@@ -421,6 +424,38 @@ forecast:
   highlight_today: true
   highlight_today_color: 'rgba(255, 193, 7, 0.15)'   # optional
 ```
+
+### Intraday Line
+The daily chart gives each day one high and one low, so it cannot show whether a day's low comes in the morning or late at night.
+With `intraday_line: true`, the chart replaces the high and low lines with one line that follows the temperature through each day.
+Each day's part of the line is drawn in that day's column. A rain band under the line takes the place of the rain bars. The icons and wind row do not change.
+```yaml
+type: custom:weather-chart-card-ha
+entity: weather.openweathermap
+forecast:
+  type: daily
+  intraday_line: true
+  intraday_entity: sensor.openweathermap_one_call_daily   # optional
+  intraday_rain_entity: sensor.openweathermap_rain_intensity   # optional
+```
+The line has three parts:
+
+- **Actual**: the weather entity's recorded `temperature` from midnight today until now, in `temperature1_color`. The card reads the history once when it loads, then adds each new state of the entity. If the history is empty or cannot be read, the line starts at now.
+- **Hourly forecast**: the weather entity's hourly forecast, in `temperature2_color`.
+- **Four a day**: after the hourly forecast ends, the `temp.morn`, `temp.day`, `temp.eve` and `temp.night` values of each `intraday_entity` entry, drawn at 6 AM, noon, 6 PM and 11 PM local time. Dashed, in `temperature2_color`. Each entry's `temp.min` and `temp.max` add an estimated point, so the line reaches the day's low and high. These temperatures must be in the hourly forecast's unit. Without `intraday_entity`, the line ends where the hourly forecast ends.
+
+Each day shows two numbers: its highest and lowest point on the line, in whole degrees and in the colour of that part of the line.
+A faint dotted line runs across each day's column at its high and at its low, with a dot where the line reaches it.
+The numbers sit where the day starts (the left of its column, or the right in RTL): the high above its dotted line and the low below. Where the line passes through a number, the number moves further up (a high) or down (a low).
+
+The rain band sits under a solid line that closes off the chart, and the day dividers run down through it. It has a faint mid line. The chance of rain grows up from it, and 100% fills the top half. The amount grows down from it.
+
+- **Today until the current hour**: the rain measured each hour by `intraday_rain_entity`, as bars in `temperature1_color`. A rate sensor is added up over each hour; any other unit is read as a running total, and a drop is a reset. The card reads the sensor's history once when it loads, then adds each new state. Without `intraday_rain_entity`, these hours stay empty.
+- **Hourly forecast**: one bar per hour for the chance and one for the amount, in `precipitation_color`. An hour's amount fills the bottom half at 0.1 in (2.54 mm).
+- **Daily forecast**: after the hourly forecast ends, each day's chance as one bar across the hours left, with boxes for the day's chance and amount. There is no amount bar, because a day's total and an hour's amount do not share a scale.
+
+On each day with hourly bars, a faint dotted line marks the highest chance and the highest amount, with the number where the day starts: the chance above its line and the amount below. Dashed lines mark where the hourly forecast starts and ends.
+`show_precipitation_labels: false` hides the daily boxes. The hourly view does not change.
 
 ### Custom Icon Sizes
 Fine-tune icon sizes for your layout:
