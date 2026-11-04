@@ -28,6 +28,12 @@ command = "npm ci"
 
 [[pre_push]]
 command = "npm run build"
+platforms = ["linux"]
+
+# A literal string, because a basic string reads \P and \G as escapes.
+[[pre_push]]
+command = 'npm run build --script-shell "C:\Program Files\Git\bin\bash.exe"'
+platforms = ["windows"]
 
 [[pre_push]]
 command = "npm test"
