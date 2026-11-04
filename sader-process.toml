@@ -1,0 +1,42 @@
+# Settings the sader skills read for this repository. The keys are defined by
+# home/rules/sader-process-standard.md in sadermine/claude.
+
+# The repository has no GitHub Projects board.
+board = false
+
+platforms = ["windows", "linux"]
+
+# GitHub Actions is off in this fork of w4mhi/weather-chart-card-ha, so the PR
+# body records these runs at its head SHA, each with exit 0, in place of the
+# `build` check (Don H, 2026-11-04). Run them in this order.
+#
+# On Windows, run the build as
+#   npm run build --script-shell "C:\Program Files\Git\bin\bash.exe"
+# because cmd.exe keeps the quotes in the lint glob.
+#
+# `npm run test:rtl` reads dist/ from the build and launches a browser: Edge on
+# Windows, and elsewhere the Chromium that `npx playwright install chromium`
+# installs.
+[ci]
+workflow = false
+
+[ci.recorded_runs]
+commands = ["npm ci", "npm run build", "npm test", "npm run test:rtl"]
+
+[[pre_push]]
+command = "npm ci"
+
+[[pre_push]]
+command = "npm run build"
+platforms = ["linux"]
+
+# A literal string, because a basic string reads \P and \G as escapes.
+[[pre_push]]
+command = 'npm run build --script-shell "C:\Program Files\Git\bin\bash.exe"'
+platforms = ["windows"]
+
+[[pre_push]]
+command = "npm test"
+
+[[pre_push]]
+command = "npm run test:rtl"
